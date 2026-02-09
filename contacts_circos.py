@@ -589,6 +589,49 @@ function arcPath(cx, cy, rOuter, rInner, start, end) {
   ].join(' ');
 }
 
+function styledArcPath(cx, cy, outerR, innerR, start, end, startAtStart, flare, flareAngle) {
+  const rCap = (outerR - innerR) / 2;
+  const midR = (outerR + innerR) / 2;
+  const capAngle = Math.atan(rCap / midR);
+  if (startAtStart) {
+    const endAdj = Math.max(start, end - capAngle);
+    const flareEnd = Math.min(endAdj, start + flareAngle);
+    const outerLargeArc = (endAdj - flareEnd) > Math.PI ? 1 : 0;
+    const innerLargeArc = (endAdj - start) > Math.PI ? 1 : 0;
+    const [sxo, syo] = polar(cx, cy, outerR + flare, start);
+    const [fx, fy] = polar(cx, cy, outerR, flareEnd);
+    const [exo, eyo] = polar(cx, cy, outerR, endAdj);
+    const [exi, eyi] = polar(cx, cy, innerR, endAdj);
+    const [sxi, syi] = polar(cx, cy, innerR, start);
+    return [
+      `M ${sxo} ${syo}`,
+      `L ${fx} ${fy}`,
+      `A ${outerR} ${outerR} 0 ${outerLargeArc} 1 ${exo} ${eyo}`,
+      `A ${rCap} ${rCap} 0 0 1 ${exi} ${eyi}`,
+      `A ${innerR} ${innerR} 0 ${innerLargeArc} 0 ${sxi} ${syi}`,
+      'Z'
+    ].join(' ');
+  }
+  const startAdj = Math.min(end, start + capAngle);
+  const flareStart = Math.max(startAdj, end - flareAngle);
+  const outerLargeArc = (flareStart - startAdj) > Math.PI ? 1 : 0;
+  const innerLargeArc = (end - startAdj) > Math.PI ? 1 : 0;
+  const [sxo, syo] = polar(cx, cy, outerR, startAdj);
+  const [fx, fy] = polar(cx, cy, outerR, flareStart);
+  const [exo, eyo] = polar(cx, cy, outerR + flare, end);
+  const [exi, eyi] = polar(cx, cy, innerR, end);
+  const [sxi, syi] = polar(cx, cy, innerR, startAdj);
+  return [
+    `M ${sxo} ${syo}`,
+    `A ${outerR} ${outerR} 0 ${outerLargeArc} 1 ${fx} ${fy}`,
+    `L ${exo} ${eyo}`,
+    `L ${exi} ${eyi}`,
+    `A ${innerR} ${innerR} 0 ${innerLargeArc} 0 ${sxi} ${syi}`,
+    `A ${rCap} ${rCap} 0 0 1 ${sxo} ${syo}`,
+    'Z'
+  ].join(' ');
+}
+
 function mixColor(c1, c2) {
   const r1 = parseInt(c1.slice(1,3), 16);
   const g1 = parseInt(c1.slice(3,5), 16);
@@ -678,7 +721,18 @@ function render() {
     const chain = chainAngles.get(id);
     const chainMeta = chainMap.get(id);
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', arcPath(cx, cy, outerR, innerR, chain.start, chain.end));
+    if (chain.length >= 10) {
+      const indicatorResidues = Math.max(2, Math.min(6, Math.round(chain.length * 0.03)));
+      const segmentAngle = (indicatorResidues / chain.length) * (chain.end - chain.start);
+      const startAtStart = (chainMeta.start_pos || 1) === 1;
+      const flare = 6;
+      path.setAttribute(
+        'd',
+        styledArcPath(cx, cy, outerR, innerR, chain.start, chain.end, startAtStart, flare, segmentAngle)
+      );
+    } else {
+      path.setAttribute('d', arcPath(cx, cy, outerR, innerR, chain.start, chain.end));
+    }
     path.setAttribute('fill', chain.color);
     path.setAttribute('opacity', '0.9');
     path.style.cursor = 'pointer';
