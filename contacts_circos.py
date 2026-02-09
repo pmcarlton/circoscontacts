@@ -547,6 +547,8 @@ orderHint.textContent = `Available chains: ${DATA.chains.map(c => c.id).join(', 
 
 let filterChain = null;
 let hoverArcPath = null;
+let filterResidue = null;
+let lastHover = null;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -670,6 +672,18 @@ function positionTooltip(event) {
   tooltip.style.top = `${y}px`;
 }
 
+function residueAtEvent(chain, chainMeta, event, cx, cy) {
+  const { x, y } = svgPoint(event);
+  let ang = Math.atan2(y - cy, x - cx);
+  if (ang < 0) ang += Math.PI * 2;
+  let adj = ang;
+  if (adj < chain.start) adj += Math.PI * 2;
+  const frac = clamp((adj - chain.start) / (chain.end - chain.start), 0, 1);
+  const idx = clamp(Math.floor(frac * chain.length) + 1, 1, chain.length);
+  const info = chainMeta.resinfo[idx - 1];
+  return { frac, idx, info };
+}
+
 function render() {
   const order = parseOrder(orderInput.value);
   const maxCount = DATA.max_count;
@@ -736,19 +750,33 @@ function render() {
     path.setAttribute('fill', chain.color);
     path.setAttribute('opacity', '0.9');
     path.style.cursor = 'pointer';
-    path.addEventListener('pointerdown', () => {
-      filterChain = id;
+    path.addEventListener('pointerdown', (event) => {
+      if (event.shiftKey) {
+        const res = (lastHover && lastHover.chain === id)
+          ? lastHover
+          : residueAtEvent(chain, chainMeta, event, cx, cy);
+        const info = res.info;
+        const label = info.pair
+          ? `DNA bp ${info.resnum}`
+          : `${info.source_chain}:${info.resname}${info.resnum}`;
+        filterResidue = {
+          displayChain: id,
+          displayPos: res.idx,
+          source_chain: info.source_chain,
+          resnum: info.resnum,
+          isDNA: !!info.pair,
+          label
+        };
+        filterChain = null;
+      } else {
+        filterChain = id;
+        filterResidue = null;
+      }
       safeRender();
     });
     path.addEventListener('mousemove', (event) => {
-      const { x, y } = svgPoint(event);
-      let ang = Math.atan2(y - cy, x - cx);
-      if (ang < 0) ang += Math.PI * 2;
-      let adj = ang;
-      if (adj < chain.start) adj += Math.PI * 2;
-      const frac = clamp((adj - chain.start) / (chain.end - chain.start), 0, 1);
-      const idx = clamp(Math.floor(frac * chain.length) + 1, 1, chain.length);
-      const info = chainMeta.resinfo[idx - 1];
+      const { frac, idx, info } = residueAtEvent(chain, chainMeta, event, cx, cy);
+      lastHover = { chain: id, idx, info };
 
       if (hoverArcPath) {
         const highlight = arcPath(cx, cy, innerR - 1, innerR - 7, chain.start, chain.start + frac * (chain.end - chain.start));
@@ -769,6 +797,7 @@ function render() {
     });
     path.addEventListener('mouseleave', () => {
       if (hoverArcPath) hoverArcPath.setAttribute('d', '');
+      lastHover = null;
       tooltip.style.opacity = '0';
     });
     arcsGroup.appendChild(path);
@@ -793,7 +822,23 @@ function render() {
     const a = chainAngles.get(link.a);
     const b = chainAngles.get(link.b);
     if (!a || !b) continue;
-    if (filterChain && link.a !== filterChain && link.b !== filterChain) continue;
+    if (filterResidue) {
+      const aInfo = chainMap.get(link.a).resinfo[link.a_pos - 1];
+      const bInfo = chainMap.get(link.b).resinfo[link.b_pos - 1];
+      let match = false;
+      if (filterResidue.isDNA) {
+        match =
+          (link.a === filterResidue.displayChain && link.a_pos === filterResidue.displayPos) ||
+          (link.b === filterResidue.displayChain && link.b_pos === filterResidue.displayPos);
+      } else {
+        match =
+          (aInfo.source_chain === filterResidue.source_chain && aInfo.resnum === filterResidue.resnum) ||
+          (bInfo.source_chain === filterResidue.source_chain && bInfo.resnum === filterResidue.resnum);
+      }
+      if (!match) continue;
+    } else if (filterChain && link.a !== filterChain && link.b !== filterChain) {
+      continue;
+    }
 
     const aPos = link.a_pos - 0.5;
     const bPos = link.b_pos - 0.5;
@@ -855,7 +900,12 @@ function render() {
 function safeRender() {
   try {
     const stats = render();
-    const filterNote = filterChain ? ` Filtered: ${filterChain}.` : '';
+    let filterNote = '';
+    if (filterResidue) {
+      filterNote = ` Filtered: ${filterResidue.label}.`;
+    } else if (filterChain) {
+      filterNote = ` Filtered: ${filterChain}.`;
+    }
     renderStatus.textContent = `Rendered ${stats.linkCount} links across ${stats.chainCount} chains.${filterNote}`;
   } catch (err) {
     renderStatus.textContent = `Render error: ${err.message}`;
@@ -887,8 +937,9 @@ document.getElementById('resetOrder').addEventListener('click', () => {
 });
 
 window.addEventListener('pointerup', () => {
-  if (filterChain) {
+  if (filterChain || filterResidue) {
     filterChain = null;
+    filterResidue = null;
     safeRender();
   }
 });
