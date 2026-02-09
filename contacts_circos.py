@@ -469,6 +469,13 @@ svg {
       </div>
     </div>
     <div class="control">
+      <label for="zoom">Zoom</label>
+      <div class="row">
+        <input id="zoom" type="range" min="0.6" max="1.6" step="0.05" value="1">
+        <input id="zoomInput" type="number" min="0.6" max="1.6" step="0.05" value="1">
+      </div>
+    </div>
+    <div class="control">
       <label for="order">Chain order</label>
       <input id="order" type="text" value="__DEFAULT_ORDER__">
       <div class="row" style="margin-top:8px;">
@@ -498,6 +505,8 @@ const maxWidth = document.getElementById('maxWidth');
 const maxWidthInput = document.getElementById('maxWidthInput');
 const angle = document.getElementById('angle');
 const angleInput = document.getElementById('angleInput');
+const zoom = document.getElementById('zoom');
+const zoomInput = document.getElementById('zoomInput');
 const orderInput = document.getElementById('order');
 const orderHint = document.getElementById('orderHint');
 const renderStatus = document.getElementById('renderStatus');
@@ -505,6 +514,9 @@ const renderStatus = document.getElementById('renderStatus');
 const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
 orderHint.textContent = `Available chains: ${DATA.chains.map(c => c.id).join(', ')}`;
+
+let filterChain = null;
+let hoverArcPath = null;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -560,6 +572,14 @@ function mixColor(c1, c2) {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
+function svgPoint(event) {
+  const rect = svg.getBoundingClientRect();
+  const vb = svg.viewBox.baseVal;
+  const x = (event.clientX - rect.left) * (vb.width / rect.width);
+  const y = (event.clientY - rect.top) * (vb.height / rect.height);
+  return { x, y };
+}
+
 function render() {
   const order = parseOrder(orderInput.value);
   const maxCount = DATA.max_count;
@@ -568,6 +588,7 @@ function render() {
   const angleOffset = Number(angle.value) * Math.PI / 180;
   const thresholdValue = Number(threshold.value);
   const maxStroke = Number(maxWidth.value);
+  const zoomValue = Number(zoom.value);
   const minStroke = 0.2;
   const minAlpha = 0.02;
   const maxAlpha = 0.9;
@@ -598,6 +619,7 @@ function render() {
   const arcsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const linksGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const labelsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const overlayGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
 
   for (const id of order) {
     const chain = chainAngles.get(id);
@@ -605,6 +627,44 @@ function render() {
     path.setAttribute('d', arcPath(cx, cy, outerR, innerR, chain.start, chain.end));
     path.setAttribute('fill', chain.color);
     path.setAttribute('opacity', '0.9');
+    path.style.cursor = 'pointer';
+    path.addEventListener('pointerdown', () => {
+      filterChain = id;
+      safeRender();
+    });
+    path.addEventListener('mousemove', (event) => {
+      const chainMeta = chainMap.get(id);
+      const { x, y } = svgPoint(event);
+      let ang = Math.atan2(y - cy, x - cx);
+      if (ang < 0) ang += Math.PI * 2;
+      let adj = ang;
+      if (adj < chain.start) adj += Math.PI * 2;
+      const frac = clamp((adj - chain.start) / (chain.end - chain.start), 0, 1);
+      const idx = clamp(Math.floor(frac * chain.length) + 1, 1, chain.length);
+      const info = chainMeta.resinfo[idx - 1];
+
+      if (hoverArcPath) {
+        const highlight = arcPath(cx, cy, innerR - 1, innerR - 7, chain.start, chain.start + frac * (chain.end - chain.start));
+        hoverArcPath.setAttribute('d', highlight);
+        hoverArcPath.setAttribute('fill', chain.color);
+        hoverArcPath.setAttribute('opacity', '0.55');
+      }
+
+      const formatInfo = (info) => {
+        if (info.pair) {
+          return `DNA bp ${info.resnum}: ${info.pair.f_chain}:${info.pair.f_resname}${info.pair.f_resnum} / ${info.pair.r_chain}:${info.pair.r_resname}${info.pair.r_resnum}`;
+        }
+        return `${info.source_chain}:${info.resname}${info.resnum}`;
+      };
+      tooltip.innerHTML = `<div><strong>${formatInfo(info)}</strong></div>`;
+      tooltip.style.opacity = '1';
+      tooltip.style.left = `${event.clientX + 14}px`;
+      tooltip.style.top = `${event.clientY + 14}px`;
+    });
+    path.addEventListener('mouseleave', () => {
+      if (hoverArcPath) hoverArcPath.setAttribute('d', '');
+      tooltip.style.opacity = '0';
+    });
     arcsGroup.appendChild(path);
 
     const mid = (chain.start + chain.end) / 2;
@@ -620,10 +680,14 @@ function render() {
     labelsGroup.appendChild(label);
   }
 
+  hoverArcPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  overlayGroup.appendChild(hoverArcPath);
+
   for (const link of DATA.contacts) {
     const a = chainAngles.get(link.a);
     const b = chainAngles.get(link.b);
     if (!a || !b) continue;
+    if (filterChain && link.a !== filterChain && link.b !== filterChain) continue;
 
     const aPos = link.a_pos - 0.5;
     const bPos = link.b_pos - 0.5;
@@ -675,7 +739,12 @@ function render() {
 
   svg.appendChild(linksGroup);
   svg.appendChild(arcsGroup);
+  svg.appendChild(overlayGroup);
   svg.appendChild(labelsGroup);
+  const scene = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  while (svg.firstChild) scene.appendChild(svg.firstChild);
+  scene.setAttribute('transform', `translate(${cx} ${cy}) scale(${zoomValue}) translate(${-cx} ${-cy})`);
+  svg.appendChild(scene);
   return {
     linkCount: linksGroup.childNodes.length,
     chainCount: order.length
@@ -685,7 +754,8 @@ function render() {
 function safeRender() {
   try {
     const stats = render();
-    renderStatus.textContent = `Rendered ${stats.linkCount} links across ${stats.chainCount} chains.`;
+    const filterNote = filterChain ? ` Filtered: ${filterChain}.` : '';
+    renderStatus.textContent = `Rendered ${stats.linkCount} links across ${stats.chainCount} chains.${filterNote}`;
   } catch (err) {
     renderStatus.textContent = `Render error: ${err.message}`;
     console.error(err);
@@ -707,11 +777,19 @@ function syncRange(range, input) {
 syncRange(threshold, thresholdInput);
 syncRange(maxWidth, maxWidthInput);
 syncRange(angle, angleInput);
+syncRange(zoom, zoomInput);
 
 document.getElementById('applyOrder').addEventListener('click', () => safeRender());
 document.getElementById('resetOrder').addEventListener('click', () => {
   orderInput.value = defaultOrder.join(', ');
   safeRender();
+});
+
+window.addEventListener('pointerup', () => {
+  if (filterChain) {
+    filterChain = null;
+    safeRender();
+  }
 });
 
 document.getElementById('downloadSvg').addEventListener('click', () => {
