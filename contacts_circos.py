@@ -119,6 +119,7 @@ def build_chain_maps(
     Dict[str, List[Dict[str, str | int]]],
     Dict[str, str],
     List[str],
+    Dict[str, int],
 ]:
     """
     Returns:
@@ -130,6 +131,7 @@ def build_chain_maps(
     pos_map: Dict[str, Dict[int, int]] = {}
     pos_info: Dict[str, List[Dict[str, str | int]]] = {}
     display_chain_of: Dict[str, str] = {}
+    start_pos_map: Dict[str, int] = {}
 
     display_chains: List[str] = []
     # Proteins first (alphabetical), DNA will be added as one chain "DNA".
@@ -152,9 +154,10 @@ def build_chain_maps(
         ]
         pos_info[chain_id] = info
         display_chain_of[chain_id] = chain_id
+        start_pos_map[chain_id] = 1
 
     if not dna_chains:
-        return pos_map, pos_info, display_chain_of, display_chains
+        return pos_map, pos_info, display_chain_of, display_chains, start_pos_map
 
     display_chains.insert(0, "DNA")
     display_chain_of.update({c: "DNA" for c in dna_chains})
@@ -173,7 +176,8 @@ def build_chain_maps(
             }
             for resnum in resnums
         ]
-        return pos_map, pos_info, display_chain_of, display_chains
+        start_pos_map["DNA"] = 1
+        return pos_map, pos_info, display_chain_of, display_chains, start_pos_map
 
     # Duplex handling: collapse to base-pair positions.
     dna_rev = dna_reverse
@@ -232,8 +236,10 @@ def build_chain_maps(
             }
         )
     pos_info["DNA"] = dna_info
+    dna_first = sorted(dna_chains)[0]
+    start_pos_map["DNA"] = 1 if dna_first == dna_forward else length
 
-    return pos_map, pos_info, display_chain_of, display_chains
+    return pos_map, pos_info, display_chain_of, display_chains, start_pos_map
 
 
 def aggregate_contacts(
@@ -303,6 +309,7 @@ def generate_html(
     contacts: List[Dict[str, int | str]],
     max_count: int,
     default_order: List[str],
+    start_pos_map: Dict[str, int],
     output_path: Path,
 ) -> None:
     data = {
@@ -313,6 +320,7 @@ def generate_html(
                 "length": chain_lengths[chain],
                 "color": chain_colors[chain],
                 "resinfo": pos_info.get(chain, []),
+                "start_pos": start_pos_map.get(chain, 1),
             }
             for chain in chains
         ],
@@ -338,6 +346,7 @@ body {
   font-family: 'IBM Plex Sans', sans-serif;
   color: #0f172a;
   background: radial-gradient(circle at 20% 20%, #f1f5f9, #e2e8f0 40%, #cbd5f5 100%);
+  overflow: hidden;
 }
 .page {
   display: grid;
@@ -345,12 +354,20 @@ body {
   gap: 24px;
   padding: 24px;
   box-sizing: border-box;
+  height: 100vh;
+  align-items: stretch;
 }
 .panel {
   background: rgba(255,255,255,0.9);
   border-radius: 16px;
   padding: 20px;
   box-shadow: 0 12px 40px rgba(15, 23, 42, 0.12);
+  max-height: calc(100vh - 48px);
+}
+.controls {
+  position: sticky;
+  top: 24px;
+  overflow: auto;
 }
 h1 {
   margin: 0 0 8px 0;
@@ -411,10 +428,11 @@ button.secondary {
   border-radius: 16px;
   padding: 10px;
   box-shadow: inset 0 0 0 1px rgba(148,163,184,0.3);
+  height: calc(100vh - 48px);
+  overflow: auto;
 }
 svg {
-  width: 100%;
-  height: auto;
+  display: block;
 }
 .tooltip {
   position: absolute;
@@ -438,13 +456,24 @@ svg {
 @media (max-width: 960px) {
   .page {
     grid-template-columns: 1fr;
+    height: auto;
+  }
+  body {
+    overflow: auto;
+  }
+  .controls {
+    position: static;
+    max-height: none;
+  }
+  .plot-wrap {
+    height: auto;
   }
 }
 </style>
 </head>
 <body>
 <div class="page">
-  <div class="panel">
+  <div class="panel controls">
     <h1>__TITLE__</h1>
     <div class="subtitle">Interactive circos view of aggregated ChimeraX contacts.</div>
     <div class="control">
@@ -489,7 +518,7 @@ svg {
       <div class="status" id="renderStatus">Render status: pending</div>
     </div>
   </div>
-  <div class="plot-wrap panel" style="position:relative;">
+  <div class="plot-wrap panel" id="plotWrap" style="position:relative;">
     <svg id="circos" viewBox="0 0 900 900" role="img" aria-label="Circos plot"></svg>
     <div class="tooltip" id="tooltip"></div>
   </div>
@@ -510,6 +539,7 @@ const zoomInput = document.getElementById('zoomInput');
 const orderInput = document.getElementById('order');
 const orderHint = document.getElementById('orderHint');
 const renderStatus = document.getElementById('renderStatus');
+const plotWrap = document.getElementById('plotWrap');
 
 const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
@@ -580,6 +610,23 @@ function svgPoint(event) {
   return { x, y };
 }
 
+function positionTooltip(event) {
+  const rect = plotWrap.getBoundingClientRect();
+  const fontSize = parseFloat(getComputedStyle(document.body).fontSize) || 16;
+  const offset = fontSize * 10;
+  let x = event.clientX - rect.left + offset;
+  let y = event.clientY - rect.top + offset * 0.6;
+  const tt = tooltip.getBoundingClientRect();
+  const maxX = rect.width - tt.width - 8;
+  const maxY = rect.height - tt.height - 8;
+  if (x > maxX) x = event.clientX - rect.left - offset - tt.width;
+  if (y > maxY) y = event.clientY - rect.top - offset - tt.height;
+  x = clamp(x, 8, Math.max(8, maxX));
+  y = clamp(y, 8, Math.max(8, maxY));
+  tooltip.style.left = `${x}px`;
+  tooltip.style.top = `${y}px`;
+}
+
 function render() {
   const order = parseOrder(orderInput.value);
   const maxCount = DATA.max_count;
@@ -589,9 +636,14 @@ function render() {
   const thresholdValue = Number(threshold.value);
   const maxStroke = Number(maxWidth.value);
   const zoomValue = Number(zoom.value);
+  const baseSize = Math.max(320, Math.floor(Math.min(plotWrap.clientWidth, plotWrap.clientHeight) - 20));
+  const svgSize = Math.floor(baseSize * zoomValue);
   const minStroke = 0.2;
   const minAlpha = 0.02;
   const maxAlpha = 0.9;
+
+  svg.setAttribute('width', svgSize.toString());
+  svg.setAttribute('height', svgSize.toString());
 
   const totalLength = order.reduce((sum, id) => sum + chainMap.get(id).length, 0);
   const available = 2 * Math.PI - gap * order.length;
@@ -620,9 +672,11 @@ function render() {
   const linksGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const labelsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const overlayGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  overlayGroup.setAttribute('pointer-events', 'none');
 
   for (const id of order) {
     const chain = chainAngles.get(id);
+    const chainMeta = chainMap.get(id);
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', arcPath(cx, cy, outerR, innerR, chain.start, chain.end));
     path.setAttribute('fill', chain.color);
@@ -633,7 +687,6 @@ function render() {
       safeRender();
     });
     path.addEventListener('mousemove', (event) => {
-      const chainMeta = chainMap.get(id);
       const { x, y } = svgPoint(event);
       let ang = Math.atan2(y - cy, x - cx);
       if (ang < 0) ang += Math.PI * 2;
@@ -658,8 +711,7 @@ function render() {
       };
       tooltip.innerHTML = `<div><strong>${formatInfo(info)}</strong></div>`;
       tooltip.style.opacity = '1';
-      tooltip.style.left = `${event.clientX + 14}px`;
-      tooltip.style.top = `${event.clientY + 14}px`;
+      positionTooltip(event);
     });
     path.addEventListener('mouseleave', () => {
       if (hoverArcPath) hoverArcPath.setAttribute('d', '');
@@ -727,8 +779,7 @@ function render() {
         <div>Count: ${count}</div>
       `;
       tooltip.style.opacity = '1';
-      tooltip.style.left = `${event.clientX + 14}px`;
-      tooltip.style.top = `${event.clientY + 14}px`;
+      positionTooltip(event);
     });
     path.addEventListener('mouseleave', () => {
       tooltip.style.opacity = '0';
@@ -741,10 +792,6 @@ function render() {
   svg.appendChild(arcsGroup);
   svg.appendChild(overlayGroup);
   svg.appendChild(labelsGroup);
-  const scene = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  while (svg.firstChild) scene.appendChild(svg.firstChild);
-  scene.setAttribute('transform', `translate(${cx} ${cy}) scale(${zoomValue}) translate(${-cx} ${-cy})`);
-  svg.appendChild(scene);
   return {
     linkCount: linksGroup.childNodes.length,
     chainCount: order.length
@@ -868,7 +915,7 @@ def main() -> None:
     else:
         sys.stderr.write("No DNA chains detected; plotting all chains independently.\n")
 
-    pos_map, pos_info, display_chain_of, display_chains = build_chain_maps(
+    pos_map, pos_info, display_chain_of, display_chains, start_pos_map = build_chain_maps(
         chain_res, dna_chains, args.dna_reverse
     )
 
@@ -891,6 +938,7 @@ def main() -> None:
         contacts,
         max_count,
         default_order,
+        start_pos_map,
         output_path,
     )
     print(f"Wrote {output_path}")
