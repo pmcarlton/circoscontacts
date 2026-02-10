@@ -5,7 +5,9 @@ Generate an interactive, presentation-quality circos-style plot from ChimeraX `.
 This tool:
 - Aggregates contacts across multiple `.contacts` files.
 - Treats DNA as a single duplex chromosome (base-pair positions), reversing one strand.
-- Provides an interactive HTML with controls for visibility threshold, line width, rotation, and chain ordering.
+- Provides an interactive HTML with controls for visibility threshold, line width, rotation, zoom, and chain ordering.
+- Supports click-and-hold filtering by chain, and shift-click-and-hold filtering by residue.
+- Shows tooltip residue details on hover and subtle arc start/end styling.
 - Exports an SVG snapshot from the browser.
 
 ## Requirements
@@ -51,8 +53,11 @@ Open the generated HTML in a browser. Controls allow:
 - Thresholding contacts by count
 - Rotating the plot
 - Adjusting max line width
+- Zooming the plot (panel scrolls when zoomed in)
 - Reordering chains
 - Downloading SVG
+ - Click-and-hold on an arc: show only contacts involving that chain
+ - Shift-click-and-hold on an arc: show only contacts involving that residue
 
 ## Notes
 

@@ -420,6 +420,14 @@ button.secondary {
   font-size: 12px;
   color: #64748b;
 }
+.hint .hidden-chain {
+  color: #dc2626;
+  font-weight: 600;
+}
+.hint .error {
+  color: #b91c1c;
+  font-weight: 600;
+}
 .plot-wrap {
   display: flex;
   align-items: center;
@@ -543,7 +551,6 @@ const plotWrap = document.getElementById('plotWrap');
 
 const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
-orderHint.textContent = `Available chains: ${DATA.chains.map(c => c.id).join(', ')}`;
 
 let filterChain = null;
 let hoverArcPath = null;
@@ -559,17 +566,30 @@ function parseOrder(raw) {
   const lowerMap = new Map(DATA.chains.map(c => [c.id.toLowerCase(), c.id]));
   const seen = new Set();
   const order = [];
+  const invalid = [];
   for (const t of tokens) {
     const id = lowerMap.get(t.toLowerCase());
     if (id && !seen.has(id)) {
       order.push(id);
       seen.add(id);
+    } else if (!id) {
+      invalid.push(t);
     }
   }
-  for (const c of defaultOrder) {
-    if (!seen.has(c)) order.push(c);
+  return { order, invalid };
+}
+
+function updateOrderHint(order, invalid) {
+  const visible = new Set(order);
+  const parts = DATA.chains.map(c => {
+    const cls = visible.has(c.id) ? '' : 'hidden-chain';
+    return `<span class="${cls}">${c.id}</span>`;
+  });
+  let msg = `Available chains: ${parts.join(', ')}`;
+  if (invalid.length) {
+    msg += ` <span class="error">Unknown: ${invalid.join(', ')}</span>`;
   }
-  return order;
+  orderHint.innerHTML = msg;
 }
 
 function polar(cx, cy, r, angle) {
@@ -685,7 +705,14 @@ function residueAtEvent(chain, chainMeta, event, cx, cy) {
 }
 
 function render() {
-  const order = parseOrder(orderInput.value);
+  const parsed = parseOrder(orderInput.value);
+  let order = parsed.order;
+  if (!order.length) {
+    order = defaultOrder.slice();
+    updateOrderHint(order, parsed.invalid.length ? parsed.invalid : ['(none)']);
+  } else {
+    updateOrderHint(order, parsed.invalid);
+  }
   const maxCount = DATA.max_count;
   const gapDeg = 2;
   const gap = gapDeg * Math.PI / 180;
