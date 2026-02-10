@@ -82,9 +82,11 @@ def detect_dna_chains(chain_res: Dict[str, Dict[int, str]]) -> List[str]:
     return sorted(dna_chains)
 
 
-def parse_contacts(contact_paths: Iterable[Path]) -> Counter:
-    counts: Counter = Counter()
+def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter]:
+    counts_atom: Counter = Counter()
+    counts_residue: Counter = Counter()
     for path in contact_paths:
+        per_file_pairs = set()
         with path.open() as fh:
             for line in fh:
                 if not line.startswith("/"):
@@ -100,8 +102,11 @@ def parse_contacts(contact_paths: Iterable[Path]) -> Counter:
                 except ValueError:
                     continue
                 key = canonical_contact(chain1, res1, chain2, res2)
-                counts[key] += 1
-    return counts
+                counts_atom[key] += 1
+                per_file_pairs.add(key)
+        for key in per_file_pairs:
+            counts_residue[key] += 1
+    return counts_atom, counts_residue
 
 
 def canonical_contact(chain1: str, res1: int, chain2: str, res2: int) -> Tuple[str, int, str, int]:
@@ -243,16 +248,18 @@ def build_chain_maps(
 
 
 def aggregate_contacts(
-    counts: Counter,
+    counts_atom: Counter,
+    counts_residue: Counter,
     pos_map: Dict[str, Dict[int, int]],
     display_chain_of: Dict[str, str],
-) -> Tuple[List[Dict[str, int | str | list]], int]:
-    agg: Counter = Counter()
+) -> Tuple[List[Dict[str, int | str | list]], int, int]:
+    agg_atom: Counter = Counter()
+    agg_residue: Counter = Counter()
     sources: Dict[Tuple[str, int, str, int], Dict[str, set]] = defaultdict(
         lambda: {"a": set(), "b": set()}
     )
     skipped = 0
-    for chain1, res1, chain2, res2 in counts:
+    for chain1, res1, chain2, res2 in counts_atom:
         if chain1 not in pos_map or chain2 not in pos_map:
             skipped += 1
             continue
@@ -271,13 +278,15 @@ def aggregate_contacts(
         else:
             sources[key]["a"].add((chain1, res1))
             sources[key]["b"].add((chain2, res2))
-        agg[key] += counts[(chain1, res1, chain2, res2)]
+        agg_atom[key] += counts_atom[(chain1, res1, chain2, res2)]
+        agg_residue[key] += counts_residue.get((chain1, res1, chain2, res2), 0)
     if skipped:
         sys.stderr.write(f"Warning: skipped {skipped} contacts without CIF mapping\n")
 
-    max_count = max(agg.values()) if agg else 1
+    max_count_atom = max(agg_atom.values()) if agg_atom else 1
+    max_count_residue = max(agg_residue.values()) if agg_residue else 1
     contacts = []
-    for (a, pa, b, pb), c in agg.items():
+    for (a, pa, b, pb), c in agg_atom.items():
         src = sources.get((a, pa, b, pb), {"a": set(), "b": set()})
         contacts.append(
             {
@@ -285,7 +294,8 @@ def aggregate_contacts(
                 "a_pos": pa,
                 "b": b,
                 "b_pos": pb,
-                "count": c,
+                "count_atom": c,
+                "count_residue": agg_residue.get((a, pa, b, pb), 0),
                 "sources_a": [
                     {"chain": chain, "resnum": resnum}
                     for chain, resnum in sorted(src["a"])
@@ -296,8 +306,8 @@ def aggregate_contacts(
                 ],
             }
         )
-    contacts.sort(key=lambda x: x["count"], reverse=True)
-    return contacts, max_count
+    contacts.sort(key=lambda x: x["count_atom"], reverse=True)
+    return contacts, max_count_atom, max_count_residue
 
 
 def build_colors(chains: List[str]) -> Dict[str, str]:
@@ -333,7 +343,8 @@ def generate_html(
     chain_colors: Dict[str, str],
     pos_info: Dict[str, List[Dict[str, str | int]]],
     contacts: List[Dict[str, int | str]],
-    max_count: int,
+    max_count_atom: int,
+    max_count_residue: int,
     default_order: List[str],
     start_pos_map: Dict[str, int],
     output_path: Path,
@@ -351,7 +362,8 @@ def generate_html(
             for chain in chains
         ],
         "contacts": contacts,
-        "max_count": max_count,
+        "max_count_atom": max_count_atom,
+        "max_count_residue": max_count_residue,
         "default_order": default_order,
     }
     data_json = json.dumps(data, separators=(",", ":"))
@@ -531,6 +543,13 @@ svg {
       </div>
     </div>
     <div class="control">
+      <label>Contact mode</label>
+      <div class="row">
+        <label class="chain-toggle"><input type="radio" name="countMode" value="atom" checked>Atom</label>
+        <label class="chain-toggle"><input type="radio" name="countMode" value="residue">Residue</label>
+      </div>
+    </div>
+    <div class="control">
       <label for="maxWidth">Maximum line width</label>
       <div class="row">
         <input id="maxWidth" type="range" min="1" max="12" step="0.5" value="6">
@@ -594,6 +613,7 @@ const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
 let currentOrder = defaultOrder.slice();
 const contactVisibility = new Map(DATA.chains.map(c => [c.id, true]));
+let countMode = 'atom';
 
 let filterChain = null;
 let hoverArcPath = null;
@@ -788,7 +808,13 @@ function render() {
       contactVisibility.set(chainId, true);
     }
   }
-  const maxCount = DATA.max_count;
+  const maxCount = countMode === 'atom' ? DATA.max_count_atom : DATA.max_count_residue;
+  threshold.max = maxCount;
+  thresholdInput.max = maxCount;
+  if (Number(threshold.value) > maxCount) {
+    threshold.value = maxCount;
+    thresholdInput.value = maxCount;
+  }
   const gapDeg = 2;
   const gap = gapDeg * Math.PI / 180;
   const angleOffset = Number(angle.value) * Math.PI / 180;
@@ -855,8 +881,10 @@ function render() {
     return link.a === filterChain || link.b === filterChain;
   };
 
+  const countFor = (link) => countMode === 'atom' ? link.count_atom : link.count_residue;
+
   const linkVisible = (link) => {
-    if (link.count < thresholdValue) return false;
+    if (countFor(link) < thresholdValue) return false;
     if (!visibleChains.has(link.a) || !visibleChains.has(link.b)) return false;
     if (contactVisibility.get(link.a) === false || contactVisibility.get(link.b) === false) return false;
     if (!residueFilterMatch(link)) return false;
@@ -976,7 +1004,7 @@ function render() {
     const [c1x, c1y] = polar(cx, cy, controlR, aAngle);
     const [c2x, c2y] = polar(cx, cy, controlR, bAngle);
 
-    const count = link.count;
+    const count = countFor(link);
     const t = clamp((count - thresholdValue) / Math.max(1, maxCount - thresholdValue), 0, 1);
     const eased = Math.pow(t, 0.65);
     const alpha = minAlpha + (maxAlpha - minAlpha) * eased;
@@ -1002,7 +1030,7 @@ function render() {
       };
       tooltip.innerHTML = `
         <div><strong>${formatInfo(aInfo)}</strong> ↔ <strong>${formatInfo(bInfo)}</strong></div>
-        <div>Count: ${count}</div>
+        <div>Count (${countMode}): ${count}</div>
       `;
       tooltip.style.opacity = '1';
       tooltip.classList.remove('clickable');
@@ -1064,6 +1092,13 @@ document.getElementById('resetOrder').addEventListener('click', () => {
   safeRender();
 });
 
+document.querySelectorAll('input[name="countMode"]').forEach((radio) => {
+  radio.addEventListener('change', (event) => {
+    countMode = event.currentTarget.value;
+    safeRender();
+  });
+});
+
 window.addEventListener('pointerup', () => {
   if (filterChain || filterResidue) {
     filterChain = null;
@@ -1098,7 +1133,8 @@ exportCxc.addEventListener('click', () => {
   lines.push('select clear');
 
   for (const link of DATA.contacts) {
-    if (link.count < thresholdValue) continue;
+    const count = countMode === 'atom' ? link.count_atom : link.count_residue;
+    if (count < thresholdValue) continue;
     if (!visible.has(link.a) || !visible.has(link.b)) continue;
     if (contactVisibility.get(link.a) === false || contactVisibility.get(link.b) === false) continue;
     const selectors = new Set();
@@ -1150,7 +1186,7 @@ safeRender();
 """
     html = (
         template.replace("__TITLE__", title)
-        .replace("__MAX_COUNT__", str(max_count))
+        .replace("__MAX_COUNT__", str(max_count_atom))
         .replace("__DEFAULT_ORDER__", ", ".join(default_order))
         .replace("__DATA_JSON__", data_json)
     )
@@ -1209,8 +1245,10 @@ def main() -> None:
         chain_res, dna_chains, args.dna_reverse
     )
 
-    raw_counts = parse_contacts(contact_paths)
-    contacts, max_count = aggregate_contacts(raw_counts, pos_map, display_chain_of)
+    raw_counts_atom, raw_counts_residue = parse_contacts(contact_paths)
+    contacts, max_count_atom, max_count_residue = aggregate_contacts(
+        raw_counts_atom, raw_counts_residue, pos_map, display_chain_of
+    )
 
     chain_lengths = {
         chain: len(pos_info.get(chain, [])) for chain in display_chains
@@ -1226,7 +1264,8 @@ def main() -> None:
         chain_colors,
         pos_info,
         contacts,
-        max_count,
+        max_count_atom,
+        max_count_residue,
         default_order,
         start_pos_map,
         output_path,
