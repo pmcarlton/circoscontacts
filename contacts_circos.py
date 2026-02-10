@@ -24,6 +24,7 @@ except Exception as exc:  # pragma: no cover - runtime check
 
 
 DNA_RESNAMES = {"DA", "DC", "DG", "DT", "DI", "DU"}
+DNA_BASE_MAP = {"DA": "A", "DC": "C", "DG": "G", "DT": "T", "DI": "I", "DU": "U"}
 
 
 def find_atom_site_category(doc: "gemmi.cif.Document") -> Dict[str, List[str]] | None:
@@ -34,8 +35,9 @@ def find_atom_site_category(doc: "gemmi.cif.Document") -> Dict[str, List[str]] |
     return None
 
 
-def parse_cifs(cif_paths: Iterable[Path]) -> Dict[str, Dict[int, str]]:
+def parse_cifs(cif_paths: Iterable[Path]) -> Tuple[Dict[str, Dict[int, str]], Dict[str, List[int]]]:
     chain_res: Dict[str, Dict[int, str]] = defaultdict(dict)
+    chain_resnums: Dict[str, List[int]] = defaultdict(list)
     conflicts: List[str] = []
     for path in cif_paths:
         doc = gemmi.cif.read(str(path))
@@ -62,13 +64,15 @@ def parse_cifs(cif_paths: Iterable[Path]) -> Dict[str, Dict[int, str]]:
                 )
                 continue
             chain_res[a][resnum] = c
+    for chain_id, residues in chain_res.items():
+        chain_resnums[chain_id] = sorted(residues)
     if conflicts:
         sys.stderr.write(
             "Warning: residue name conflicts across CIFs (showing first 5):\n"
         )
         for line in conflicts[:5]:
             sys.stderr.write(f"  {line}\n")
-    return chain_res
+    return chain_res, chain_resnums
 
 
 def detect_dna_chains(chain_res: Dict[str, Dict[int, str]]) -> List[str]:
@@ -80,6 +84,70 @@ def detect_dna_chains(chain_res: Dict[str, Dict[int, str]]) -> List[str]:
         if dna_count / max(1, len(residues)) >= 0.5:
             dna_chains.append(chain_id)
     return sorted(dna_chains)
+
+
+def dna_sequence(residues: Dict[int, str], resnums: List[int]) -> str:
+    seq = []
+    for r in resnums:
+        seq.append(DNA_BASE_MAP.get(residues.get(r, ""), "N"))
+    return "".join(seq)
+
+
+def reverse_complement(seq: str) -> str:
+    comp = {"A": "T", "T": "A", "C": "G", "G": "C", "I": "I", "U": "A", "N": "N"}
+    return "".join(comp.get(b, "N") for b in reversed(seq))
+
+
+def count_mismatches(a: str, b: str) -> int:
+    return sum(1 for x, y in zip(a, b) if x != y)
+
+
+def detect_split_dna(
+    dna_chains: List[str],
+    chain_res: Dict[str, Dict[int, str]],
+    chain_resnums: Dict[str, List[int]],
+    mismatches: int,
+) -> Dict[str, object] | None:
+    if len(dna_chains) != 3:
+        return None
+    lengths = {c: len(chain_resnums.get(c, [])) for c in dna_chains}
+    long_chain = max(lengths, key=lengths.get)
+    if list(lengths.values()).count(lengths[long_chain]) > 1:
+        return None
+    short_chains = [c for c in dna_chains if c != long_chain]
+    if lengths[short_chains[0]] + lengths[short_chains[1]] != lengths[long_chain]:
+        return None
+
+    long_seq = dna_sequence(chain_res[long_chain], chain_resnums[long_chain])
+    short_seqs = {
+        c: dna_sequence(chain_res[c], chain_resnums[c]) for c in short_chains
+    }
+
+    order1 = short_chains
+    order2 = short_chains[::-1]
+    seq1 = short_seqs[order1[0]] + short_seqs[order1[1]]
+    seq2 = short_seqs[order2[0]] + short_seqs[order2[1]]
+
+    rc_long = reverse_complement(long_seq)
+    mism1 = count_mismatches(seq1, rc_long)
+    mism2 = count_mismatches(seq2, rc_long)
+
+    best = None
+    if mism1 <= mismatches:
+        best = (order1, mism1, seq1)
+    if mism2 <= mismatches and (best is None or mism2 < best[1]):
+        best = (order2, mism2, seq2)
+    if best is None:
+        return None
+
+    order, mism, comp_seq = best
+    return {
+        "long_chain": long_chain,
+        "short_order": order,
+        "mismatches": mism,
+        "long_seq": long_seq,
+        "comp_seq": comp_seq,
+    }
 
 
 def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter]:
@@ -117,8 +185,10 @@ def canonical_contact(chain1: str, res1: int, chain2: str, res2: int) -> Tuple[s
 
 def build_chain_maps(
     chain_res: Dict[str, Dict[int, str]],
+    chain_resnums: Dict[str, List[int]],
     dna_chains: List[str],
     dna_reverse: str | None,
+    dna_mismatches: int,
 ) -> Tuple[
     Dict[str, Dict[int, int]],
     Dict[str, List[Dict[str, str | int]]],
@@ -146,7 +216,7 @@ def build_chain_maps(
     # Build protein maps
     for chain_id in protein_chains:
         residues = chain_res.get(chain_id, {})
-        resnums = sorted(residues)
+        resnums = chain_resnums.get(chain_id, sorted(residues))
         pos_map[chain_id] = {resnum: idx + 1 for idx, resnum in enumerate(resnums)}
         info = [
             {
@@ -170,7 +240,7 @@ def build_chain_maps(
     if len(dna_chains) == 1:
         dna_chain = dna_chains[0]
         residues = chain_res.get(dna_chain, {})
-        resnums = sorted(residues)
+        resnums = chain_resnums.get(dna_chain, sorted(residues))
         pos_map[dna_chain] = {resnum: idx + 1 for idx, resnum in enumerate(resnums)}
         pos_info["DNA"] = [
             {
@@ -182,6 +252,72 @@ def build_chain_maps(
             for resnum in resnums
         ]
         start_pos_map["DNA"] = 1
+        return pos_map, pos_info, display_chain_of, display_chains, start_pos_map
+
+    split = detect_split_dna(dna_chains, chain_res, chain_resnums, dna_mismatches)
+    if split:
+        long_chain = split["long_chain"]
+        short_order = split["short_order"]
+        long_resnums = chain_resnums.get(long_chain, sorted(chain_res[long_chain]))
+        comp_entries = []
+        for chain_id in short_order:
+            resnums = chain_resnums.get(chain_id, sorted(chain_res[chain_id]))
+            for resnum in resnums:
+                comp_entries.append(
+                    {
+                        "chain": chain_id,
+                        "resnum": resnum,
+                        "resname": chain_res[chain_id][resnum],
+                    }
+                )
+        length = min(len(long_resnums), len(comp_entries))
+        pos_map[long_chain] = {}
+        for idx, resnum in enumerate(long_resnums[:length]):
+            pos_map[long_chain][resnum] = idx + 1
+        for entry_idx, entry in enumerate(comp_entries[:length]):
+            pos = length - entry_idx
+            pos_map.setdefault(entry["chain"], {})[entry["resnum"]] = pos
+
+        dna_info: List[Dict[str, str | int]] = []
+        for i in range(length):
+            long_resnum = long_resnums[i]
+            comp_entry = comp_entries[length - i - 1]
+            dna_info.append(
+                {
+                    "chain": "DNA",
+                    "resnum": i + 1,
+                    "resname": "bp",
+                    "source_chain": "DNA",
+                    "pair": {
+                        "f_chain": long_chain,
+                        "f_resnum": long_resnum,
+                        "f_resname": chain_res[long_chain].get(long_resnum, "?"),
+                        "r_chain": comp_entry["chain"],
+                        "r_resnum": comp_entry["resnum"],
+                        "r_resname": comp_entry["resname"],
+                    },
+                }
+            )
+        pos_info["DNA"] = dna_info
+        dna_first = sorted(dna_chains)[0]
+        first_resnum = 1
+        if first_resnum not in chain_res.get(dna_first, {}):
+            first_resnum = min(chain_res.get(dna_first, {1: ""}).keys())
+        start_pos_map["DNA"] = pos_map[dna_first].get(first_resnum, 1)
+        if dna_info:
+            first = dna_info[0]["pair"]
+            last = dna_info[-1]["pair"]
+            sys.stderr.write(
+                "Detected split DNA: long="
+                f"{long_chain} shorts={','.join(short_order)} mismatches={split['mismatches']} "
+                f"bp1={first['f_chain']}:{first['f_resnum']}/{first['r_chain']}:{first['r_resnum']} "
+                f"bpN={last['f_chain']}:{last['f_resnum']}/{last['r_chain']}:{last['r_resnum']}\n"
+            )
+        else:
+            sys.stderr.write(
+                "Detected split DNA: long="
+                f"{long_chain} shorts={','.join(short_order)} mismatches={split['mismatches']}\n"
+            )
         return pos_map, pos_info, display_chain_of, display_chains, start_pos_map
 
     # Duplex handling: collapse to base-pair positions.
@@ -205,8 +341,8 @@ def build_chain_maps(
 
     f_residues = chain_res.get(dna_forward, {})
     r_residues = chain_res.get(dna_rev, {})
-    f_resnums = sorted(f_residues)
-    r_resnums = sorted(r_residues)
+    f_resnums = chain_resnums.get(dna_forward, sorted(f_residues))
+    r_resnums = chain_resnums.get(dna_rev, sorted(r_residues))
 
     length = min(len(f_resnums), len(r_resnums))
     if len(f_resnums) != len(r_resnums):
@@ -242,7 +378,10 @@ def build_chain_maps(
         )
     pos_info["DNA"] = dna_info
     dna_first = sorted(dna_chains)[0]
-    start_pos_map["DNA"] = 1 if dna_first == dna_forward else length
+    first_resnum = 1
+    if first_resnum not in chain_res.get(dna_first, {}):
+        first_resnum = min(chain_res.get(dna_first, {1: ""}).keys())
+    start_pos_map["DNA"] = pos_map[dna_first].get(first_resnum, 1)
 
     return pos_map, pos_info, display_chain_of, display_chains, start_pos_map
 
@@ -279,7 +418,18 @@ def aggregate_contacts(
             sources[key]["a"].add((chain1, res1))
             sources[key]["b"].add((chain2, res2))
         agg_atom[key] += counts_atom[(chain1, res1, chain2, res2)]
-        agg_residue[key] += counts_residue.get((chain1, res1, chain2, res2), 0)
+
+    for chain1, res1, chain2, res2 in counts_residue:
+        if chain1 not in pos_map or chain2 not in pos_map:
+            continue
+        if res1 not in pos_map[chain1] or res2 not in pos_map[chain2]:
+            continue
+        a_chain = display_chain_of.get(chain1, chain1)
+        b_chain = display_chain_of.get(chain2, chain2)
+        a_pos = pos_map[chain1][res1]
+        b_pos = pos_map[chain2][res2]
+        key = canonical_contact(a_chain, a_pos, b_chain, b_pos)
+        agg_residue[key] += counts_residue[(chain1, res1, chain2, res2)]
     if skipped:
         sys.stderr.write(f"Warning: skipped {skipped} contacts without CIF mapping\n")
 
@@ -1224,6 +1374,12 @@ def main() -> None:
             "(duplex mode)."
         ),
     )
+    parser.add_argument(
+        "--dna-mismatches",
+        type=int,
+        default=0,
+        help="Allowed mismatches when detecting split DNA (default: 0).",
+    )
     args = parser.parse_args()
 
     contacts_dir: Path = args.contacts_dir
@@ -1234,7 +1390,7 @@ def main() -> None:
     if not cif_paths:
         raise SystemExit(f"No CIF files found in {contacts_dir}")
 
-    chain_res = parse_cifs(cif_paths)
+    chain_res, chain_resnums = parse_cifs(cif_paths)
     dna_chains = args.dna_chains or detect_dna_chains(chain_res)
     if dna_chains:
         sys.stderr.write(f"DNA chains: {', '.join(dna_chains)}\n")
@@ -1242,7 +1398,7 @@ def main() -> None:
         sys.stderr.write("No DNA chains detected; plotting all chains independently.\n")
 
     pos_map, pos_info, display_chain_of, display_chains, start_pos_map = build_chain_maps(
-        chain_res, dna_chains, args.dna_reverse
+        chain_res, chain_resnums, dna_chains, args.dna_reverse, args.dna_mismatches
     )
 
     raw_counts_atom, raw_counts_residue = parse_contacts(contact_paths)
