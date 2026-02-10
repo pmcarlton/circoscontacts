@@ -454,6 +454,15 @@ button.secondary {
   color: #b91c1c;
   font-weight: 600;
 }
+.hint .chain-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+}
+.hint input[type="checkbox"] {
+  transform: translateY(1px);
+}
 .plot-wrap {
   display: flex;
   align-items: center;
@@ -539,7 +548,7 @@ svg {
       </div>
     </div>
     <div class="control">
-      <label for="order">Chain order</label>
+      <label for="order">Chain Presence/Order</label>
       <input id="order" type="text" value="__DEFAULT_ORDER__">
       <div class="row" style="margin-top:8px;">
         <button id="applyOrder">Apply order</button>
@@ -580,6 +589,7 @@ const exportCxc = document.getElementById('exportCxc');
 const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
 let currentOrder = defaultOrder.slice();
+const contactVisibility = new Map(DATA.chains.map(c => [c.id, true]));
 
 let filterChain = null;
 let hoverArcPath = null;
@@ -611,14 +621,26 @@ function parseOrder(raw) {
 function updateOrderHint(order, invalid) {
   const visible = new Set(order);
   const parts = DATA.chains.map(c => {
-    const cls = visible.has(c.id) ? '' : 'hidden-chain';
-    return `<span class="${cls}">${c.id}</span>`;
+    const inOrder = visible.has(c.id);
+    const cls = inOrder ? '' : 'hidden-chain';
+    const checked = inOrder && contactVisibility.get(c.id) !== false ? 'checked' : '';
+    const disabled = inOrder ? '' : 'disabled';
+    return `<label class="chain-toggle ${cls}"><input type="checkbox" data-chain="${c.id}" ${checked} ${disabled}>${c.id}</label>`;
   });
-  let msg = `Available chains: ${parts.join(', ')}`;
+  let msg = `Chains: ${parts.join(' ')}`;
   if (invalid.length) {
     msg += ` <span class="error">Unknown: ${invalid.join(', ')}</span>`;
   }
   orderHint.innerHTML = msg;
+  orderHint.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+    box.addEventListener('change', (event) => {
+      const target = event.currentTarget;
+      const chainId = target.getAttribute('data-chain');
+      const checked = target.checked;
+      contactVisibility.set(chainId, checked);
+      safeRender();
+    });
+  });
 }
 
 function polar(cx, cy, r, angle) {
@@ -756,6 +778,11 @@ function render() {
     updateOrderHint(order, parsed.invalid);
   }
   currentOrder = order.slice();
+  for (const chainId of order) {
+    if (!contactVisibility.has(chainId)) {
+      contactVisibility.set(chainId, true);
+    }
+  }
   const maxCount = DATA.max_count;
   const gapDeg = 2;
   const gap = gapDeg * Math.PI / 180;
@@ -909,6 +936,7 @@ function render() {
     } else if (filterChain && link.a !== filterChain && link.b !== filterChain) {
       continue;
     }
+    if (contactVisibility.get(link.a) === false || contactVisibility.get(link.b) === false) continue;
 
     const aPos = link.a_pos - 0.5;
     const bPos = link.b_pos - 0.5;
@@ -1042,6 +1070,7 @@ exportCxc.addEventListener('click', () => {
   for (const link of DATA.contacts) {
     if (link.count < thresholdValue) continue;
     if (!visible.has(link.a) || !visible.has(link.b)) continue;
+    if (contactVisibility.get(link.a) === false || contactVisibility.get(link.b) === false) continue;
     const selectors = new Set();
 
     if (link.sources_a && link.sources_b) {
