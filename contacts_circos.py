@@ -246,8 +246,11 @@ def aggregate_contacts(
     counts: Counter,
     pos_map: Dict[str, Dict[int, int]],
     display_chain_of: Dict[str, str],
-) -> Tuple[List[Dict[str, int | str]], int]:
+) -> Tuple[List[Dict[str, int | str | list]], int]:
     agg: Counter = Counter()
+    sources: Dict[Tuple[str, int, str, int], Dict[str, set]] = defaultdict(
+        lambda: {"a": set(), "b": set()}
+    )
     skipped = 0
     for chain1, res1, chain2, res2 in counts:
         if chain1 not in pos_map or chain2 not in pos_map:
@@ -261,15 +264,38 @@ def aggregate_contacts(
         a_pos = pos_map[chain1][res1]
         b_pos = pos_map[chain2][res2]
         key = canonical_contact(a_chain, a_pos, b_chain, b_pos)
+        swapped = key != (a_chain, a_pos, b_chain, b_pos)
+        if swapped:
+            sources[key]["a"].add((chain2, res2))
+            sources[key]["b"].add((chain1, res1))
+        else:
+            sources[key]["a"].add((chain1, res1))
+            sources[key]["b"].add((chain2, res2))
         agg[key] += counts[(chain1, res1, chain2, res2)]
     if skipped:
         sys.stderr.write(f"Warning: skipped {skipped} contacts without CIF mapping\n")
 
     max_count = max(agg.values()) if agg else 1
-    contacts = [
-        {"a": a, "a_pos": pa, "b": b, "b_pos": pb, "count": c}
-        for (a, pa, b, pb), c in agg.items()
-    ]
+    contacts = []
+    for (a, pa, b, pb), c in agg.items():
+        src = sources.get((a, pa, b, pb), {"a": set(), "b": set()})
+        contacts.append(
+            {
+                "a": a,
+                "a_pos": pa,
+                "b": b,
+                "b_pos": pb,
+                "count": c,
+                "sources_a": [
+                    {"chain": chain, "resnum": resnum}
+                    for chain, resnum in sorted(src["a"])
+                ],
+                "sources_b": [
+                    {"chain": chain, "resnum": resnum}
+                    for chain, resnum in sorted(src["b"])
+                ],
+            }
+        )
     contacts.sort(key=lambda x: x["count"], reverse=True)
     return contacts, max_count
 
@@ -523,6 +549,7 @@ svg {
     </div>
     <div class="control">
       <button id="downloadSvg">Download SVG</button>
+      <button id="exportCxc" class="secondary" style="margin-left:8px;">ChimeraX Colors</button>
       <div class="status" id="renderStatus">Render status: pending</div>
     </div>
   </div>
@@ -548,9 +575,11 @@ const orderInput = document.getElementById('order');
 const orderHint = document.getElementById('orderHint');
 const renderStatus = document.getElementById('renderStatus');
 const plotWrap = document.getElementById('plotWrap');
+const exportCxc = document.getElementById('exportCxc');
 
 const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
+let currentOrder = defaultOrder.slice();
 
 let filterChain = null;
 let hoverArcPath = null;
@@ -667,6 +696,19 @@ function mixColor(c1, c2) {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
+function mixHexColor(c1, c2) {
+  const r1 = parseInt(c1.slice(1,3), 16);
+  const g1 = parseInt(c1.slice(3,5), 16);
+  const b1 = parseInt(c1.slice(5,7), 16);
+  const r2 = parseInt(c2.slice(1,3), 16);
+  const g2 = parseInt(c2.slice(3,5), 16);
+  const b2 = parseInt(c2.slice(5,7), 16);
+  const r = Math.round((r1 + r2) / 2);
+  const g = Math.round((g1 + g2) / 2);
+  const b = Math.round((b1 + b2) / 2);
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
 function svgPoint(event) {
   const rect = svg.getBoundingClientRect();
   const vb = svg.viewBox.baseVal;
@@ -713,6 +755,7 @@ function render() {
   } else {
     updateOrderHint(order, parsed.invalid);
   }
+  currentOrder = order.slice();
   const maxCount = DATA.max_count;
   const gapDeg = 2;
   const gap = gapDeg * Math.PI / 180;
@@ -979,6 +1022,62 @@ document.getElementById('downloadSvg').addEventListener('click', () => {
   const a = document.createElement('a');
   a.href = url;
   a.download = 'contacts_circos.svg';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
+exportCxc.addEventListener('click', () => {
+  const thresholdValue = Number(threshold.value);
+  const visible = new Set(currentOrder);
+  const lines = [];
+  lines.push(`# ChimeraX colors from contacts_circos`);
+  lines.push(`# threshold: ${thresholdValue}`);
+  lines.push(`# chains: ${currentOrder.join(', ')}`);
+  lines.push('color light gray');
+  lines.push('color light gray target s');
+  lines.push('select clear');
+
+  for (const link of DATA.contacts) {
+    if (link.count < thresholdValue) continue;
+    if (!visible.has(link.a) || !visible.has(link.b)) continue;
+    const selectors = new Set();
+
+    if (link.sources_a && link.sources_b) {
+      for (const src of link.sources_a) {
+        selectors.add(`/${src.chain}:${src.resnum}`);
+      }
+      for (const src of link.sources_b) {
+        selectors.add(`/${src.chain}:${src.resnum}`);
+      }
+    } else {
+      const addSelectors = (chainId, pos) => {
+        const info = chainMap.get(chainId).resinfo[pos - 1];
+        if (info && info.pair) {
+          selectors.add(`/${info.pair.f_chain}:${info.pair.f_resnum}`);
+          selectors.add(`/${info.pair.r_chain}:${info.pair.r_resnum}`);
+        } else if (info) {
+          selectors.add(`/${info.source_chain}:${info.resnum}`);
+        }
+      };
+
+      addSelectors(link.a, link.a_pos);
+      addSelectors(link.b, link.b_pos);
+    }
+
+    if (selectors.size === 0) continue;
+    const color = mixHexColor(chainMap.get(link.a).color, chainMap.get(link.b).color);
+    lines.push(`select ${Array.from(selectors).join(' ')}`);
+    lines.push(`color sel ${color} target rs`);
+    lines.push('select clear');
+  }
+
+  const blob = new Blob([lines.join('\\n') + '\\n'], {type: 'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'contacts_circos_colors.cxc';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
