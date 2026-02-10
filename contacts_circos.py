@@ -488,6 +488,10 @@ svg {
   opacity: 0;
   transition: opacity 0.15s ease;
 }
+.tooltip.clickable {
+  background: dodgerblue;
+  box-shadow: 0 10px 24px rgba(30, 144, 255, 0.45);
+}
 .status {
   font-size: 12px;
   color: #0f172a;
@@ -595,6 +599,7 @@ let filterChain = null;
 let hoverArcPath = null;
 let filterResidue = null;
 let lastHover = null;
+let clickableResidues = new Map();
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -795,6 +800,7 @@ function render() {
   const minStroke = 0.2;
   const minAlpha = 0.02;
   const maxAlpha = 0.9;
+  const visibleChains = new Set(order);
 
   svg.setAttribute('width', svgSize.toString());
   svg.setAttribute('height', svgSize.toString());
@@ -827,6 +833,43 @@ function render() {
   const labelsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const overlayGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   overlayGroup.setAttribute('pointer-events', 'none');
+
+  const residueFilterMatch = (link) => {
+    if (!filterResidue) return true;
+    const aInfo = chainMap.get(link.a).resinfo[link.a_pos - 1];
+    const bInfo = chainMap.get(link.b).resinfo[link.b_pos - 1];
+    if (filterResidue.isDNA) {
+      return (
+        (link.a === filterResidue.displayChain && link.a_pos === filterResidue.displayPos) ||
+        (link.b === filterResidue.displayChain && link.b_pos === filterResidue.displayPos)
+      );
+    }
+    return (
+      (aInfo.source_chain === filterResidue.source_chain && aInfo.resnum === filterResidue.resnum) ||
+      (bInfo.source_chain === filterResidue.source_chain && bInfo.resnum === filterResidue.resnum)
+    );
+  };
+
+  const chainFilterMatch = (link) => {
+    if (!filterChain) return true;
+    return link.a === filterChain || link.b === filterChain;
+  };
+
+  const linkVisible = (link) => {
+    if (link.count < thresholdValue) return false;
+    if (!visibleChains.has(link.a) || !visibleChains.has(link.b)) return false;
+    if (contactVisibility.get(link.a) === false || contactVisibility.get(link.b) === false) return false;
+    if (!residueFilterMatch(link)) return false;
+    if (!chainFilterMatch(link)) return false;
+    return true;
+  };
+
+  clickableResidues = new Map(order.map(id => [id, new Set()]));
+  for (const link of DATA.contacts) {
+    if (!linkVisible(link)) continue;
+    if (clickableResidues.has(link.a)) clickableResidues.get(link.a).add(link.a_pos);
+    if (clickableResidues.has(link.b)) clickableResidues.get(link.b).add(link.b_pos);
+  }
 
   for (const id of order) {
     const chain = chainAngles.get(id);
@@ -890,11 +933,14 @@ function render() {
       };
       tooltip.innerHTML = `<div><strong>${formatInfo(info)}</strong></div>`;
       tooltip.style.opacity = '1';
+      const clickable = clickableResidues.get(id) && clickableResidues.get(id).has(idx);
+      tooltip.classList.toggle('clickable', Boolean(clickable));
       positionTooltip(event);
     });
     path.addEventListener('mouseleave', () => {
       if (hoverArcPath) hoverArcPath.setAttribute('d', '');
       lastHover = null;
+      tooltip.classList.remove('clickable');
       tooltip.style.opacity = '0';
     });
     arcsGroup.appendChild(path);
@@ -919,24 +965,7 @@ function render() {
     const a = chainAngles.get(link.a);
     const b = chainAngles.get(link.b);
     if (!a || !b) continue;
-    if (filterResidue) {
-      const aInfo = chainMap.get(link.a).resinfo[link.a_pos - 1];
-      const bInfo = chainMap.get(link.b).resinfo[link.b_pos - 1];
-      let match = false;
-      if (filterResidue.isDNA) {
-        match =
-          (link.a === filterResidue.displayChain && link.a_pos === filterResidue.displayPos) ||
-          (link.b === filterResidue.displayChain && link.b_pos === filterResidue.displayPos);
-      } else {
-        match =
-          (aInfo.source_chain === filterResidue.source_chain && aInfo.resnum === filterResidue.resnum) ||
-          (bInfo.source_chain === filterResidue.source_chain && bInfo.resnum === filterResidue.resnum);
-      }
-      if (!match) continue;
-    } else if (filterChain && link.a !== filterChain && link.b !== filterChain) {
-      continue;
-    }
-    if (contactVisibility.get(link.a) === false || contactVisibility.get(link.b) === false) continue;
+    if (!linkVisible(link)) continue;
 
     const aPos = link.a_pos - 0.5;
     const bPos = link.b_pos - 0.5;
@@ -976,6 +1005,7 @@ function render() {
         <div>Count: ${count}</div>
       `;
       tooltip.style.opacity = '1';
+      tooltip.classList.remove('clickable');
       positionTooltip(event);
     });
     path.addEventListener('mouseleave', () => {
