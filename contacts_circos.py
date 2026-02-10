@@ -622,6 +622,18 @@ button.secondary {
   gap: 4px;
   margin-right: 8px;
 }
+.hint .flip-toggle {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  font-size: 12px;
+  color: #475569;
+  cursor: pointer;
+  user-select: none;
+}
+.hint .flip-toggle.active {
+  font-weight: 600;
+}
 .hint input[type="checkbox"] {
   transform: translateY(1px);
 }
@@ -763,6 +775,7 @@ const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
 let currentOrder = defaultOrder.slice();
 const contactVisibility = new Map(DATA.chains.map(c => [c.id, true]));
+const chainFlip = new Map(DATA.chains.map(c => [c.id, false]));
 let countMode = 'atom';
 
 let filterChain = null;
@@ -800,19 +813,32 @@ function updateOrderHint(order, invalid) {
     const cls = inOrder ? '' : 'hidden-chain';
     const checked = inOrder && contactVisibility.get(c.id) !== false ? 'checked' : '';
     const disabled = inOrder ? '' : 'disabled';
-    return `<label class="chain-toggle ${cls}"><input type="checkbox" data-chain="${c.id}" ${checked} ${disabled}>${c.id}</label>`;
+    const flipped = chainFlip.get(c.id) ? 'active' : '';
+    const symbol = chainFlip.get(c.id) ? '◀' : '▶';
+    const flipDisabled = inOrder ? '' : 'aria-disabled="true"';
+    return `<span class="chain-toggle ${cls}"><label><input type="checkbox" data-role="contacts" data-chain="${c.id}" ${checked} ${disabled}>${c.id}</label><span class="flip-toggle ${flipped}" data-role="flip" data-chain="${c.id}" ${flipDisabled}>${symbol}</span></span>`;
   });
   let msg = `Chains: ${parts.join(' ')}`;
   if (invalid.length) {
     msg += ` <span class="error">Unknown: ${invalid.join(', ')}</span>`;
   }
   orderHint.innerHTML = msg;
-  orderHint.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+  orderHint.querySelectorAll('input[type="checkbox"][data-role="contacts"]').forEach((box) => {
     box.addEventListener('change', (event) => {
       const target = event.currentTarget;
       const chainId = target.getAttribute('data-chain');
       const checked = target.checked;
       contactVisibility.set(chainId, checked);
+      safeRender();
+    });
+  });
+  orderHint.querySelectorAll('.flip-toggle[data-role="flip"]').forEach((node) => {
+    node.addEventListener('click', (event) => {
+      const target = event.currentTarget;
+      if (target.getAttribute('aria-disabled') === 'true') return;
+      const chainId = target.getAttribute('data-chain');
+      const next = !(chainFlip.get(chainId) === true);
+      chainFlip.set(chainId, next);
       safeRender();
     });
   });
@@ -937,8 +963,13 @@ function residueAtEvent(chain, chainMeta, event, cx, cy) {
   if (ang < 0) ang += Math.PI * 2;
   let adj = ang;
   if (adj < chain.start) adj += Math.PI * 2;
-  const frac = clamp((adj - chain.start) / (chain.end - chain.start), 0, 1);
-  const idx = clamp(Math.floor(frac * chain.length) + 1, 1, chain.length);
+  const rawFrac = clamp((adj - chain.start) / (chain.end - chain.start), 0, 1);
+  let idx = clamp(Math.floor(rawFrac * chain.length) + 1, 1, chain.length);
+  let frac = rawFrac;
+  if (chain.flip) {
+    idx = chain.length - idx + 1;
+    frac = 1 - rawFrac;
+  }
   const info = chainMeta.resinfo[idx - 1];
   return { frac, idx, info };
 }
@@ -991,7 +1022,13 @@ function render() {
     const chain = chainMap.get(id);
     const start = cursor;
     const end = start + chain.length * scale;
-    chainAngles.set(id, { start, end, length: chain.length, color: chain.color });
+    chainAngles.set(id, {
+      start,
+      end,
+      length: chain.length,
+      color: chain.color,
+      flip: chainFlip.get(id) === true
+    });
     cursor = end + gap;
   }
 
@@ -1010,14 +1047,20 @@ function render() {
   const overlayGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   overlayGroup.setAttribute('pointer-events', 'none');
 
+  const displayPos = (chainId, pos) => {
+    const chain = chainAngles.get(chainId);
+    if (!chain) return pos;
+    return chain.flip ? (chain.length - pos + 1) : pos;
+  };
+
   const residueFilterMatch = (link) => {
     if (!filterResidue) return true;
     const aInfo = chainMap.get(link.a).resinfo[link.a_pos - 1];
     const bInfo = chainMap.get(link.b).resinfo[link.b_pos - 1];
     if (filterResidue.isDNA) {
       return (
-        (link.a === filterResidue.displayChain && link.a_pos === filterResidue.displayPos) ||
-        (link.b === filterResidue.displayChain && link.b_pos === filterResidue.displayPos)
+        (link.a === filterResidue.displayChain && displayPos(link.a, link.a_pos) === filterResidue.displayPos) ||
+        (link.b === filterResidue.displayChain && displayPos(link.b, link.b_pos) === filterResidue.displayPos)
       );
     }
     return (
@@ -1045,8 +1088,8 @@ function render() {
   clickableResidues = new Map(order.map(id => [id, new Set()]));
   for (const link of DATA.contacts) {
     if (!linkVisible(link)) continue;
-    if (clickableResidues.has(link.a)) clickableResidues.get(link.a).add(link.a_pos);
-    if (clickableResidues.has(link.b)) clickableResidues.get(link.b).add(link.b_pos);
+    if (clickableResidues.has(link.a)) clickableResidues.get(link.a).add(displayPos(link.a, link.a_pos));
+    if (clickableResidues.has(link.b)) clickableResidues.get(link.b).add(displayPos(link.b, link.b_pos));
   }
 
   for (const id of order) {
@@ -1056,7 +1099,7 @@ function render() {
     if (chain.length >= 10) {
       const indicatorResidues = Math.max(2, Math.min(6, Math.round(chain.length * 0.03)));
       const segmentAngle = (indicatorResidues / chain.length) * (chain.end - chain.start);
-      const startAtStart = (chainMeta.start_pos || 1) === 1;
+      const startAtStart = ((chainMeta.start_pos || 1) === 1) !== (chain.flip === true);
       const flare = 6;
       path.setAttribute(
         'd',
@@ -1145,8 +1188,8 @@ function render() {
     if (!a || !b) continue;
     if (!linkVisible(link)) continue;
 
-    const aPos = link.a_pos - 0.5;
-    const bPos = link.b_pos - 0.5;
+    const aPos = displayPos(link.a, link.a_pos) - 0.5;
+    const bPos = displayPos(link.b, link.b_pos) - 0.5;
     const aAngle = a.start + (aPos / a.length) * (a.end - a.start);
     const bAngle = b.start + (bPos / b.length) * (b.end - b.start);
     const [x1, y1] = polar(cx, cy, linkR, aAngle);
