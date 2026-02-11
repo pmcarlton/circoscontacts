@@ -26,12 +26,18 @@ pip install gemmi
 From the project root:
 
 ```bash
+python tools/contacts_circos.py --title "SPO-11 DNA Contacts"
+```
+
+To target a specific directory of `.contacts` and `.cif` files:
+
+```bash
 python tools/contacts_circos.py \
   --contacts-dir data/chimerax/SPORM/spo-dsb-full-cifs/correct \
   --title "SPO-11 DNA Contacts"
 ```
 
-The output HTML is written to `contacts_circos.html` in the contacts directory.
+The output HTML is written to `contacts_circos.html` in the contacts directory (default: current directory).
 
 ### DNA orientation
 

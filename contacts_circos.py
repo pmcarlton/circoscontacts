@@ -1393,7 +1393,7 @@ def main() -> None:
     parser.add_argument(
         "--contacts-dir",
         type=Path,
-        default=Path("data/chimerax/SPORM/spo-dsb-full-cifs/correct"),
+        default=Path("."),
         help="Directory containing .contacts and .cif files.",
     )
     parser.add_argument("--contacts-glob", default="*.contacts")
