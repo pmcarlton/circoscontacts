@@ -617,22 +617,33 @@ button.secondary {
   font-weight: 600;
 }
 .hint .chain-toggle {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
-  margin-right: 8px;
+  gap: 8px;
+  margin: 4px 0;
 }
 .hint .flip-toggle {
   display: inline-flex;
   align-items: center;
   margin-left: 4px;
   font-size: 12px;
-  color: #475569;
   cursor: pointer;
   user-select: none;
 }
 .hint .flip-toggle.active {
   font-weight: 600;
+}
+.hint .orig-label {
+  min-width: 22px;
+  font-weight: 600;
+}
+.hint .name-input {
+  flex: 1;
+  min-width: 90px;
+  padding: 4px 6px;
+  border: 1px solid #cbd5f5;
+  border-radius: 6px;
+  font-size: 12px;
 }
 .hint input[type="checkbox"] {
   transform: translateY(1px);
@@ -740,6 +751,11 @@ svg {
         <button id="resetOrder" class="secondary">Reset</button>
       </div>
       <div class="hint" id="orderHint"></div>
+      <label for="labelSize" style="margin-top:8px;">Label font size</label>
+      <div class="row">
+        <input id="labelSize" type="range" min="8" max="24" step="1" value="12">
+        <input id="labelSizeInput" type="number" min="8" max="24" step="1" value="12">
+      </div>
     </div>
     <div class="control">
       <button id="downloadSvg">Download SVG</button>
@@ -765,6 +781,8 @@ const angle = document.getElementById('angle');
 const angleInput = document.getElementById('angleInput');
 const zoom = document.getElementById('zoom');
 const zoomInput = document.getElementById('zoomInput');
+const labelSize = document.getElementById('labelSize');
+const labelSizeInput = document.getElementById('labelSizeInput');
 const orderInput = document.getElementById('order');
 const orderHint = document.getElementById('orderHint');
 const renderStatus = document.getElementById('renderStatus');
@@ -776,6 +794,7 @@ const defaultOrder = DATA.default_order.slice();
 let currentOrder = defaultOrder.slice();
 const contactVisibility = new Map(DATA.chains.map(c => [c.id, true]));
 const chainFlip = new Map(DATA.chains.map(c => [c.id, false]));
+const chainDisplayName = new Map(DATA.chains.map(c => [c.id, c.id]));
 let countMode = 'atom';
 
 let filterChain = null;
@@ -786,6 +805,14 @@ let clickableResidues = new Map();
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function escapeHtml(value) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;');
 }
 
 function parseOrder(raw) {
@@ -816,9 +843,16 @@ function updateOrderHint(order, invalid) {
     const flipped = chainFlip.get(c.id) ? 'active' : '';
     const symbol = chainFlip.get(c.id) ? '◀' : '▶';
     const flipDisabled = inOrder ? '' : 'aria-disabled="true"';
-    return `<span class="chain-toggle ${cls}"><label><input type="checkbox" data-role="contacts" data-chain="${c.id}" ${checked} ${disabled}>${c.id}</label><span class="flip-toggle ${flipped}" data-role="flip" data-chain="${c.id}" ${flipDisabled}>${symbol}</span></span>`;
+    const displayName = escapeHtml(chainDisplayName.get(c.id) || c.id);
+    const flipColor = c.color || '#475569';
+    return `<div class="chain-toggle ${cls}">
+      <input type="checkbox" data-role="contacts" data-chain="${c.id}" ${checked} ${disabled}>
+      <span class="orig-label">${c.id}</span>
+      <span class="flip-toggle ${flipped}" data-role="flip" data-chain="${c.id}" style="color:${flipColor}" ${flipDisabled}>${symbol}</span>
+      <input class="name-input" type="text" data-role="name" data-chain="${c.id}" value="${displayName}" ${disabled}>
+    </div>`;
   });
-  let msg = `Chains: ${parts.join(' ')}`;
+  let msg = `Chains:${parts.join('')}`;
   if (invalid.length) {
     msg += ` <span class="error">Unknown: ${invalid.join(', ')}</span>`;
   }
@@ -840,6 +874,44 @@ function updateOrderHint(order, invalid) {
       const next = !(chainFlip.get(chainId) === true);
       chainFlip.set(chainId, next);
       safeRender();
+    });
+  });
+  orderHint.querySelectorAll('input[data-role="name"]').forEach((node) => {
+    const commitName = (target) => {
+      const chainId = target.getAttribute('data-chain');
+      const lastValid = chainDisplayName.get(chainId) || chainId;
+      const next = target.value.trim();
+      if (!next) {
+        target.value = lastValid;
+        return false;
+      }
+      if (next === lastValid) {
+        return false;
+      }
+      chainDisplayName.set(chainId, next);
+      return true;
+    };
+
+    node.addEventListener('keydown', (event) => {
+      const target = event.currentTarget;
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        if (commitName(target)) {
+          safeRender();
+        } else {
+          target.value = chainDisplayName.get(target.getAttribute('data-chain')) || target.getAttribute('data-chain');
+        }
+      } else if (event.key === 'Tab') {
+        if (commitName(target)) {
+          safeRender();
+        }
+      }
+    });
+
+    node.addEventListener('blur', (event) => {
+      const target = event.currentTarget;
+      const chainId = target.getAttribute('data-chain');
+      target.value = chainDisplayName.get(chainId) || chainId;
     });
   });
 }
@@ -1172,10 +1244,10 @@ function render() {
     label.setAttribute('x', tx);
     label.setAttribute('y', ty);
     label.setAttribute('fill', '#0f172a');
-    label.setAttribute('font-size', '12');
+    label.setAttribute('font-size', labelSize.value);
     label.setAttribute('font-weight', '600');
     label.setAttribute('text-anchor', 'middle');
-    label.textContent = id;
+    label.textContent = chainDisplayName.get(id) || id;
     labelsGroup.appendChild(label);
   }
 
@@ -1278,6 +1350,7 @@ syncRange(threshold, thresholdInput);
 syncRange(maxWidth, maxWidthInput);
 syncRange(angle, angleInput);
 syncRange(zoom, zoomInput);
+syncRange(labelSize, labelSizeInput);
 
 document.getElementById('applyOrder').addEventListener('click', () => safeRender());
 document.getElementById('resetOrder').addEventListener('click', () => {
