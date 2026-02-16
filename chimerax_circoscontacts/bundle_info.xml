@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<BundleInfo name="ChimeraX-CircosContacts" version="0.1.7" package="circoscontacts" minSessionVersion="1" maxSessionVersion="1">
+  <Author>KeitaPhD Tools</Author>
+  <Email>pcarlton@example.org</Email>
+  <URL>https://example.org/chimerax-circoscontacts</URL>
+  <Synopsis>Generate circos contact plots from open ChimeraX models.</Synopsis>
+  <Description>
+    Adds the 'circoscontacts' command to aggregate ChimeraX contacts over open or selected
+    atomic models and render an interactive circos HTML view.
+  </Description>
+  <Classifiers>
+    <ChimeraXClassifier>Command :: circoscontacts :: Structure Analysis :: Generate circos contacts plot from open or selected models</ChimeraXClassifier>
+  </Classifiers>
+  <Categories>
+    <Category name="Structure Analysis"/>
+  </Categories>
+</BundleInfo>
