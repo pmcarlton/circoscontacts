@@ -723,6 +723,50 @@ svg {
   background: dodgerblue;
   box-shadow: 0 10px 24px rgba(30, 144, 255, 0.45);
 }
+.selection-menu {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.18);
+  padding: 8px;
+  min-width: 230px;
+  z-index: 10;
+  display: none;
+}
+.selection-menu .menu-title {
+  font-size: 12px;
+  color: #334155;
+  margin: 0 0 6px 0;
+  font-weight: 600;
+}
+.selection-menu .menu-block {
+  border-top: 1px solid #e2e8f0;
+  padding-top: 6px;
+  margin-top: 6px;
+}
+.selection-menu .menu-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 4px;
+}
+.selection-menu button {
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.selection-menu button:disabled {
+  background: #cbd5e1;
+  color: #64748b;
+  cursor: not-allowed;
+}
+.selection-menu input[type="color"] {
+  width: 34px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
 .status {
   font-size: 12px;
   color: #0f172a;
@@ -811,8 +855,9 @@ svg {
     </div>
   </div>
   <div class="plot-wrap panel" id="plotWrap" style="position:relative;">
-    <svg id="circos" viewBox="0 0 900 900" role="img" aria-label="Circos plot"></svg>
+    <svg id="circos" viewBox="0 0 1400 900" role="img" aria-label="Circos plot"></svg>
     <div class="tooltip" id="tooltip"></div>
+    <div class="selection-menu" id="selectionMenu"></div>
   </div>
 </div>
 <script>
@@ -836,6 +881,7 @@ const renderStatus = document.getElementById('renderStatus');
 const plotWrap = document.getElementById('plotWrap');
 const saveHtml = document.getElementById('saveHtml');
 const exportCxc = document.getElementById('exportCxc');
+const selectionMenu = document.getElementById('selectionMenu');
 
 const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
@@ -850,6 +896,20 @@ let hoverArcPath = null;
 let filterResidue = null;
 let lastHover = null;
 let clickableResidues = new Map();
+let arcSelections = [];
+let nextSelectionId = 1;
+let dragSelection = null;
+let suppressNextClick = false;
+let activeCalloutDrag = null;
+const dnaSeqSideCache = new Map();
+const CANVAS_W = 1400;
+const CANVAS_H = 900;
+
+const AA1 = {
+  ALA: 'A', ARG: 'R', ASN: 'N', ASP: 'D', CYS: 'C', GLN: 'Q', GLU: 'E', GLY: 'G',
+  HIS: 'H', ILE: 'I', LEU: 'L', LYS: 'K', MET: 'M', PHE: 'F', PRO: 'P', SER: 'S',
+  THR: 'T', TRP: 'W', TYR: 'Y', VAL: 'V', SEC: 'U', PYL: 'O'
+};
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -1052,6 +1112,17 @@ function mixHexColor(c1, c2) {
   return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 }
 
+function lightenHexColor(hex, amount = 0.45) {
+  const c = String(hex || '#888888');
+  const r = parseInt(c.slice(1, 3), 16);
+  const g = parseInt(c.slice(3, 5), 16);
+  const b = parseInt(c.slice(5, 7), 16);
+  const nr = Math.round(r + (255 - r) * amount);
+  const ng = Math.round(g + (255 - g) * amount);
+  const nb = Math.round(b + (255 - b) * amount);
+  return `#${nr.toString(16).padStart(2, '0')}${ng.toString(16).padStart(2, '0')}${nb.toString(16).padStart(2, '0')}`;
+}
+
 function svgPoint(event) {
   const rect = svg.getBoundingClientRect();
   const vb = svg.viewBox.baseVal;
@@ -1091,7 +1162,127 @@ function residueAtEvent(chain, chainMeta, event, cx, cy) {
     frac = 1 - rawFrac;
   }
   const info = chainMeta.resinfo[idx - 1];
-  return { frac, idx, info };
+  return { rawFrac, frac, idx, info };
+}
+
+function normalizeRange(startPos, endPos) {
+  return [Math.min(startPos, endPos), Math.max(startPos, endPos)];
+}
+
+function selectionLength(sel) {
+  const [s, e] = normalizeRange(sel.startPos, sel.endPos);
+  return e - s + 1;
+}
+
+function baseCode(resname) {
+  if (!resname) return 'N';
+  const up = String(resname).toUpperCase();
+  if (up === 'DT') return 'T';
+  if (up === 'DA') return 'A';
+  if (up === 'DC') return 'C';
+  if (up === 'DG') return 'G';
+  if (up === 'DU') return 'U';
+  return up.length ? up[up.length - 1] : 'N';
+}
+
+function dnaPreferredSide(chainId, chainMeta) {
+  if (dnaSeqSideCache.has(chainId)) return dnaSeqSideCache.get(chainId);
+  const pairs = (chainMeta.resinfo || []).filter((x) => x && x.pair);
+  if (!pairs.length) return null;
+  const fChains = new Set(pairs.map((x) => x.pair.f_chain));
+  const rChains = new Set(pairs.map((x) => x.pair.r_chain));
+  let side = 'f';
+  if (!(fChains.size === 1 && rChains.size > 1)) {
+    const sample = pairs[0].pair;
+    side = String(sample.f_chain).localeCompare(String(sample.r_chain)) <= 0 ? 'f' : 'r';
+  }
+  dnaSeqSideCache.set(chainId, side);
+  return side;
+}
+
+function selectionSequenceText(sel) {
+  const chainMeta = chainMap.get(sel.chainId);
+  if (!chainMeta) return '';
+  const dnaSide = dnaPreferredSide(sel.chainId, chainMeta);
+  const [s, e] = normalizeRange(sel.startPos, sel.endPos);
+  const tokens = [];
+  for (let pos = s; pos <= e; pos += 1) {
+    const info = chainMeta.resinfo[pos - 1];
+    if (!info) continue;
+    if (info.pair) {
+      const one = dnaSide === 'r'
+        ? baseCode(info.pair.r_resname)
+        : baseCode(info.pair.f_resname);
+      tokens.push(one);
+    } else {
+      const aa = AA1[String(info.resname || '').toUpperCase()] || 'X';
+      tokens.push(aa);
+    }
+  }
+  return tokens.join('');
+}
+
+function staticLinkVisible(link, thresholdValue, visibleChains) {
+  const count = countMode === 'atom' ? link.count_atom : link.count_residue;
+  if (count < thresholdValue) return false;
+  if (!visibleChains.has(link.a) || !visibleChains.has(link.b)) return false;
+  if (contactVisibility.get(link.a) === false || contactVisibility.get(link.b) === false) return false;
+  return true;
+}
+
+function trimSelectionToContacts(sel, thresholdValue, visibleChains) {
+  const [s, e] = normalizeRange(sel.startPos, sel.endPos);
+  const touching = [];
+  for (const link of DATA.contacts) {
+    if (!staticLinkVisible(link, thresholdValue, visibleChains)) continue;
+    if (link.a === sel.chainId && link.a_pos >= s && link.a_pos <= e) touching.push(link.a_pos);
+    if (link.b === sel.chainId && link.b_pos >= s && link.b_pos <= e) touching.push(link.b_pos);
+  }
+  if (!touching.length) return null;
+  return [Math.min(...touching), Math.max(...touching)];
+}
+
+function selectionDisplayBounds(sel, chain) {
+  const a = chain.flip ? (chain.length - sel.startPos + 1) : sel.startPos;
+  const b = chain.flip ? (chain.length - sel.endPos + 1) : sel.endPos;
+  return normalizeRange(a, b);
+}
+
+function closeSelectionMenu() {
+  selectionMenu.style.display = 'none';
+  selectionMenu.innerHTML = '';
+}
+
+function wrapLines(text, maxWidthPx) {
+  const charPx = 7.2;
+  const maxChars = Math.max(1, Math.floor(maxWidthPx / charPx));
+  const rawLines = String(text || '').split('\\n');
+  const out = [];
+  for (const raw of rawLines) {
+    const words = raw.split(/\\s+/).filter(Boolean);
+    if (!words.length) {
+      out.push('');
+      continue;
+    }
+    let line = words[0];
+    for (let i = 1; i < words.length; i += 1) {
+      const next = `${line} ${words[i]}`;
+      if (next.length <= maxChars) {
+        line = next;
+      } else {
+        out.push(line);
+        line = words[i];
+      }
+    }
+    out.push(line);
+  }
+  return out.length ? out : [''];
+}
+
+function nearestPointOnRect(x, y, rx, ry, rw, rh) {
+  const nx = Math.max(rx, Math.min(x, rx + rw));
+  const ny = Math.max(ry, Math.min(y, ry + rh));
+  return [nx, ny];
 }
 
 function normalizeRanges(ranges, maxLen) {
@@ -1154,15 +1345,19 @@ function render() {
   const thresholdValue = Number(threshold.value);
   const maxStroke = Number(maxWidth.value);
   const zoomValue = Number(zoom.value);
-  const baseSize = Math.max(320, Math.floor(Math.min(plotWrap.clientWidth, plotWrap.clientHeight) - 20));
-  const svgSize = Math.floor(baseSize * zoomValue);
+  const availW = Math.max(320, Math.floor(plotWrap.clientWidth - 20));
+  const availH = Math.max(320, Math.floor(plotWrap.clientHeight - 20));
+  const fitScale = Math.min(availW / CANVAS_W, availH / CANVAS_H);
+  const renderScale = Math.max(0.2, fitScale * zoomValue);
+  const svgW = Math.floor(CANVAS_W * renderScale);
+  const svgH = Math.floor(CANVAS_H * renderScale);
   const minStroke = 0.2;
   const minAlpha = 0.02;
   const maxAlpha = 0.9;
   const visibleChains = new Set(order);
 
-  svg.setAttribute('width', svgSize.toString());
-  svg.setAttribute('height', svgSize.toString());
+  svg.setAttribute('width', svgW.toString());
+  svg.setAttribute('height', svgH.toString());
 
   const totalLength = order.reduce((sum, id) => sum + chainMap.get(id).length, 0);
   const available = 2 * Math.PI - gap * order.length;
@@ -1186,17 +1381,21 @@ function render() {
 
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
-  const cx = 450;
-  const cy = 450;
+  const cx = CANVAS_W / 2;
+  const cy = CANVAS_H / 2;
   const outerR = 360;
   const innerR = 330;
   const linkR = 320;
   const controlR = 140;
 
   const arcsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const selectionFillGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const selectionStrokeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const calloutGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const linksGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const labelsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const overlayGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const targetGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   overlayGroup.setAttribute('pointer-events', 'none');
 
   const displayPos = (chainId, pos) => {
@@ -1211,8 +1410,8 @@ function render() {
     const bInfo = chainMap.get(link.b).resinfo[link.b_pos - 1];
     if (filterResidue.isDNA) {
       return (
-        (link.a === filterResidue.displayChain && displayPos(link.a, link.a_pos) === filterResidue.displayPos) ||
-        (link.b === filterResidue.displayChain && displayPos(link.b, link.b_pos) === filterResidue.displayPos)
+        (link.a === filterResidue.displayChain && link.a_pos === filterResidue.dataPos) ||
+        (link.b === filterResidue.displayChain && link.b_pos === filterResidue.dataPos)
       );
     }
     return (
@@ -1240,8 +1439,8 @@ function render() {
   clickableResidues = new Map(order.map(id => [id, new Set()]));
   for (const link of DATA.contacts) {
     if (!linkVisible(link)) continue;
-    if (clickableResidues.has(link.a)) clickableResidues.get(link.a).add(displayPos(link.a, link.a_pos));
-    if (clickableResidues.has(link.b)) clickableResidues.get(link.b).add(displayPos(link.b, link.b_pos));
+    if (clickableResidues.has(link.a)) clickableResidues.get(link.a).add(link.a_pos);
+    if (clickableResidues.has(link.b)) clickableResidues.get(link.b).add(link.b_pos);
   }
 
   const anyActiveMask = order.some((chainId) => {
@@ -1279,6 +1478,7 @@ function render() {
     path.setAttribute('opacity', baseOpacity);
     path.style.cursor = 'pointer';
     path.addEventListener('pointerdown', (event) => {
+      closeSelectionMenu();
       if (event.shiftKey) {
         const res = (lastHover && lastHover.chain === id)
           ? lastHover
@@ -1289,7 +1489,7 @@ function render() {
           : `${info.source_chain}:${info.resname}${info.resnum}`;
         filterResidue = {
           displayChain: id,
-          displayPos: res.idx,
+          dataPos: res.idx,
           source_chain: info.source_chain,
           resnum: info.resnum,
           isDNA: !!info.pair,
@@ -1297,17 +1497,36 @@ function render() {
         };
         filterChain = null;
       } else {
+        const res = residueAtEvent(chain, chainMeta, event, cx, cy);
+        dragSelection = {
+          chainId: id,
+          startPos: res.idx,
+          currentPos: res.idx,
+          moved: false
+        };
         filterChain = id;
         filterResidue = null;
       }
       safeRender();
     });
     path.addEventListener('mousemove', (event) => {
-      const { frac, idx, info } = residueAtEvent(chain, chainMeta, event, cx, cy);
+      const { rawFrac, idx, info } = residueAtEvent(chain, chainMeta, event, cx, cy);
       lastHover = { chain: id, idx, info };
+      if (dragSelection && dragSelection.chainId === id) {
+        if (dragSelection.currentPos !== idx) dragSelection.moved = true;
+        dragSelection.currentPos = idx;
+        safeRender();
+        return;
+      }
 
       if (hoverArcPath) {
-        const highlight = arcPath(cx, cy, innerR - 1, innerR - 7, chain.start, chain.start + frac * (chain.end - chain.start));
+        const span = chain.end - chain.start;
+        const rawAngle = chain.start + rawFrac * span;
+        const hStart = chain.flip ? rawAngle : chain.start;
+        const hEnd = chain.flip ? chain.end : rawAngle;
+        const highlight = hEnd > hStart
+          ? arcPath(cx, cy, innerR - 1, innerR - 7, hStart, hEnd)
+          : '';
         hoverArcPath.setAttribute('d', highlight);
         hoverArcPath.setAttribute('fill', chain.color);
         hoverArcPath.setAttribute('opacity', '0.55');
@@ -1328,6 +1547,7 @@ function render() {
     path.addEventListener('mouseleave', () => {
       if (hoverArcPath) hoverArcPath.setAttribute('d', '');
       lastHover = null;
+      if (dragSelection && dragSelection.chainId === id) return;
       tooltip.classList.remove('clickable');
       tooltip.style.opacity = '0';
     });
@@ -1362,6 +1582,337 @@ function render() {
 
   hoverArcPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   overlayGroup.appendChild(hoverArcPath);
+
+  const openSelectionMenuAt = (event, chainId, pos) => {
+    event.stopPropagation();
+    const clicked = arcSelections.filter((x) => {
+      if (x.chainId !== chainId) return false;
+      const [a, b] = normalizeRange(x.startPos, x.endPos);
+      return pos >= a && pos <= b;
+    }).sort((a, b) => b.id - a.id);
+    if (!clicked.length) return;
+    const thresholdValue = Number(threshold.value);
+    const visibleChains = new Set(currentOrder);
+    const blocks = clicked.map((item) => {
+      const [a, b] = normalizeRange(item.startPos, item.endPos);
+      const seqText = selectionSequenceText(item);
+      const seqEnabled = seqText.length > 0;
+      const canTrim = trimSelectionToContacts(item, thresholdValue, visibleChains) !== null;
+      const maxLen = chainMap.get(item.chainId).length;
+      return `
+        <div class="menu-block">
+          <div class="menu-title">${item.chainId}:${a}-${b}</div>
+          <div class="menu-row">
+            <button data-action="callout" data-id="${item.id}" ${seqEnabled ? '' : 'disabled'}>Sequence callout</button>
+            <button data-action="comment" data-id="${item.id}">Comment</button>
+            <button data-action="autotrim" data-id="${item.id}" ${canTrim ? '' : 'disabled'}>Autotrim</button>
+            <button data-action="clear" data-id="${item.id}">Clear</button>
+          </div>
+          <div class="menu-row">
+            <span style="font-size:12px;color:#334155;">Edit</span>
+            <input type="number" data-action="start" data-id="${item.id}" value="${a}" min="1" max="${maxLen}" style="width:64px;">
+            <input type="range" data-action="startRange" data-id="${item.id}" value="${a}" min="1" max="${maxLen}" style="width:90px;">
+          </div>
+          <div class="menu-row">
+            <span style="font-size:12px;color:#334155;">&nbsp;</span>
+            <input type="number" data-action="end" data-id="${item.id}" value="${b}" min="1" max="${maxLen}" style="width:64px;">
+            <input type="range" data-action="endRange" data-id="${item.id}" value="${b}" min="1" max="${maxLen}" style="width:90px;">
+            <button data-action="applyEdit" data-id="${item.id}">Apply</button>
+          </div>
+          <div class="menu-row">
+            <span style="font-size:12px;color:#334155;">Color</span>
+            <input type="color" data-action="color" data-id="${item.id}" value="${item.color || chainMap.get(item.chainId).color}">
+          </div>
+        </div>
+      `;
+    }).join('');
+    selectionMenu.innerHTML = `<div class="menu-title">Selections (${clicked.length})</div>${blocks}`;
+    const rect = plotWrap.getBoundingClientRect();
+    selectionMenu.style.left = `${clamp(event.clientX - rect.left + 10, 6, rect.width - 250)}px`;
+    selectionMenu.style.top = `${clamp(event.clientY - rect.top + 10, 6, rect.height - 220)}px`;
+    selectionMenu.style.display = 'block';
+
+    selectionMenu.querySelectorAll('[data-action]').forEach((node) => {
+      if (node.tagName === 'BUTTON') {
+        node.addEventListener('click', (evt) => {
+        evt.stopPropagation();
+        const idVal = Number(evt.currentTarget.getAttribute('data-id'));
+        const act = evt.currentTarget.getAttribute('data-action');
+        const selObj = arcSelections.find((x) => x.id === idVal);
+        if (!selObj) return;
+        if (act === 'callout') {
+          const text = selectionSequenceText(selObj);
+          if (!text) return;
+          selObj.callout = selObj.callout || { kind: 'sequence', text, x: null, y: null, w: 180, h: 44 };
+          selObj.callout.kind = 'sequence';
+          selObj.callout.text = text;
+        } else if (act === 'comment') {
+          selObj.callout = selObj.callout || { kind: 'comment', text: '', x: null, y: null, w: 220, h: 80 };
+          selObj.callout.kind = 'comment';
+          selObj.callout.text = selObj.comment || selObj.callout.text || '';
+        } else if (act === 'autotrim') {
+          const trimmed = trimSelectionToContacts(selObj, thresholdValue, visibleChains);
+          if (trimmed) {
+            selObj.startPos = trimmed[0];
+            selObj.endPos = trimmed[1];
+          }
+        } else if (act === 'applyEdit') {
+          const maxLen = chainMap.get(selObj.chainId).length;
+          const s = clamp(Number(selObj._editStart ?? selObj.startPos), 1, maxLen);
+          const e = clamp(Number(selObj._editEnd ?? selObj.endPos), 1, maxLen);
+          if (s <= e) {
+            selObj.startPos = s;
+            selObj.endPos = e;
+          }
+        } else if (act === 'clear') {
+          arcSelections = arcSelections.filter((x) => x.id !== idVal);
+        }
+        closeSelectionMenu();
+        safeRender();
+        });
+      }
+      if (node.tagName === 'INPUT') {
+        node.addEventListener('input', (evt) => {
+          evt.stopPropagation();
+          const idVal = Number(evt.currentTarget.getAttribute('data-id'));
+          const act = evt.currentTarget.getAttribute('data-action');
+          const selObj = arcSelections.find((x) => x.id === idVal);
+          if (!selObj) return;
+          if (act === 'color') {
+            selObj.color = evt.currentTarget.value;
+          } else if (act === 'start' || act === 'startRange') {
+            const v = clamp(Number(evt.currentTarget.value), 1, chainMap.get(selObj.chainId).length);
+            selObj._editStart = v;
+            selectionMenu.querySelector(`input[data-action="start"][data-id="${idVal}"]`).value = v;
+            selectionMenu.querySelector(`input[data-action="startRange"][data-id="${idVal}"]`).value = v;
+          } else if (act === 'end' || act === 'endRange') {
+            const v = clamp(Number(evt.currentTarget.value), 1, chainMap.get(selObj.chainId).length);
+            selObj._editEnd = v;
+            selectionMenu.querySelector(`input[data-action="end"][data-id="${idVal}"]`).value = v;
+            selectionMenu.querySelector(`input[data-action="endRange"][data-id="${idVal}"]`).value = v;
+          }
+          safeRender();
+        });
+      }
+    });
+  };
+
+  const renderSel = (sel, idxInStack = 0, preview = false) => {
+    const chain = chainAngles.get(sel.chainId);
+    if (!chain) return;
+    const [ds, de] = selectionDisplayBounds(sel, chain);
+    const span = chain.end - chain.start;
+    const segStart = chain.start + ((ds - 1) / chain.length) * span;
+    const segEnd = chain.start + (de / chain.length) * span;
+    if (segEnd <= segStart) return;
+    const color = sel.color || chain.color;
+
+    const fillPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    fillPath.setAttribute('d', arcPath(cx, cy, outerR, innerR, segStart, segEnd));
+    fillPath.setAttribute('fill', color);
+    fillPath.setAttribute('opacity', preview ? '0.20' : '0.28');
+    fillPath.setAttribute('pointer-events', 'none');
+    selectionFillGroup.appendChild(fillPath);
+
+    const strokePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    strokePath.setAttribute('d', arcPath(cx, cy, outerR + 0.5, innerR - 0.5, segStart, segEnd));
+    strokePath.setAttribute('fill', 'none');
+    strokePath.setAttribute('stroke', lightenHexColor(color, 0.5));
+    strokePath.setAttribute('stroke-width', preview ? '2.0' : '3.6');
+    strokePath.setAttribute('stroke-dasharray', 'none');
+    strokePath.setAttribute('stroke-linecap', 'round');
+    strokePath.setAttribute('pointer-events', 'none');
+    selectionStrokeGroup.appendChild(strokePath);
+
+    if (sel.callout && !preview) {
+      const mid = (ds + de) / 2;
+      const midAngle = chain.start + ((mid - 0.5) / chain.length) * (chain.end - chain.start);
+      const [axRaw, ayRaw] = polar(cx, cy, outerR + 92 + idxInStack * 28, midAngle);
+      const callout = sel.callout;
+      if (callout.x == null || callout.y == null) {
+        callout.w = callout.w || 220;
+        callout.h = callout.h || 80;
+        callout.x = clamp(axRaw - callout.w / 2, 0, CANVAS_W - callout.w);
+        callout.y = clamp(ayRaw - callout.h / 2, 0, CANVAS_H - callout.h);
+      }
+      const width = clamp(callout.w || 220, 80, 760);
+      const textVal = callout.kind === 'comment'
+        ? (callout.text || '')
+        : (selectionSequenceText(sel) || `${sel.chainId}:${sel.startPos}-${sel.endPos}`);
+      const lines = wrapLines(textVal, width - 4);
+      const minH = lines.length * 14 + 8;
+      const height = clamp(Math.max(callout.h || minH, minH), minH, 620);
+      const boxX = clamp(callout.x, 0, CANVAS_W - width);
+      const boxY = clamp(callout.y, 0, CANVAS_H - height);
+      callout.x = boxX;
+      callout.y = boxY;
+      callout.w = width;
+      callout.h = height;
+
+      const anchorX = cx + (outerR + 8) * Math.cos(midAngle);
+      const anchorY = cy + (outerR + 8) * Math.sin(midAngle);
+      const [toX, toY] = nearestPointOnRect(anchorX, anchorY, boxX, boxY, width, height);
+      const leader = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      leader.setAttribute('x1', anchorX);
+      leader.setAttribute('y1', anchorY);
+      leader.setAttribute('x2', toX);
+      leader.setAttribute('y2', toY);
+      leader.setAttribute('stroke', color);
+      leader.setAttribute('stroke-width', '1.4');
+      calloutGroup.appendChild(leader);
+
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('x', boxX);
+      rect.setAttribute('y', boxY);
+      rect.setAttribute('rx', '6');
+      rect.setAttribute('ry', '6');
+      rect.setAttribute('width', `${width}`);
+      rect.setAttribute('height', `${height}`);
+      rect.setAttribute('fill', 'rgba(255,255,255,0.92)');
+      rect.setAttribute('stroke', color);
+      rect.setAttribute('stroke-width', '1');
+      calloutGroup.appendChild(rect);
+
+      const dragHandle = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      dragHandle.setAttribute('x', boxX + 2);
+      dragHandle.setAttribute('y', boxY + 2);
+      dragHandle.setAttribute('width', `${Math.max(12, width - 4)}`);
+      dragHandle.setAttribute('height', '12');
+      dragHandle.setAttribute('fill', 'rgba(148,163,184,0.18)');
+      dragHandle.style.cursor = 'move';
+      dragHandle.addEventListener('pointerdown', (ev) => {
+        ev.stopPropagation();
+        const p = svgPoint(ev);
+        activeCalloutDrag = { id: sel.id, mode: 'move', sx: p.x, sy: p.y, ox: boxX, oy: boxY };
+      });
+      calloutGroup.appendChild(dragHandle);
+
+      const fo = document.createElementNS('http://www.w3.org/2000/svg', 'foreignObject');
+      fo.setAttribute('x', boxX + 2);
+      fo.setAttribute('y', boxY + 16);
+      fo.setAttribute('width', `${Math.max(4, width - 4)}`);
+      fo.setAttribute('height', `${Math.max(4, height - 18)}`);
+      const div = document.createElement('div');
+      div.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+      div.setAttribute(
+        'style',
+        'width:100%;height:100%;overflow:auto;white-space:pre-wrap;word-break:break-word;'
+        + 'font:12px \"IBM Plex Sans\",sans-serif;color:#0f172a;outline:none;padding:0;margin:0;'
+      );
+      div.contentEditable = 'true';
+      div.textContent = textVal;
+      div.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+      div.addEventListener('input', () => {
+        sel.callout.text = div.innerText;
+        if (sel.callout.kind !== 'comment' && sel.callout.text !== selectionSequenceText(sel)) {
+          sel.callout.kind = 'comment';
+          sel.comment = sel.callout.text;
+        }
+        if (sel.callout.kind === 'comment') {
+          sel.comment = sel.callout.text;
+        }
+      });
+      div.addEventListener('blur', () => safeRender());
+      fo.appendChild(div);
+      calloutGroup.appendChild(fo);
+
+      const corners = [
+        ['nw', boxX, boxY],
+        ['ne', boxX + width, boxY],
+        ['sw', boxX, boxY + height],
+        ['se', boxX + width, boxY + height],
+      ];
+      for (const [mode, hx, hy] of corners) {
+        const h = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        h.setAttribute('x', hx - 6);
+        h.setAttribute('y', hy - 6);
+        h.setAttribute('width', '12');
+        h.setAttribute('height', '12');
+        h.setAttribute('fill', '#ffffff');
+        h.setAttribute('fill-opacity', '0');
+        h.setAttribute('stroke', color);
+        h.setAttribute('stroke-width', '1');
+        h.setAttribute('stroke-opacity', '0');
+        h.style.cursor = `${mode}-resize`;
+        h.addEventListener('pointerdown', (ev) => {
+          ev.stopPropagation();
+          const p = svgPoint(ev);
+          activeCalloutDrag = { id: sel.id, mode, sx: p.x, sy: p.y, ox: boxX, oy: boxY, ow: width, oh: height };
+        });
+        calloutGroup.appendChild(h);
+      }
+    }
+  };
+
+  arcSelections.forEach((sel, idx) => renderSel(sel, idx, false));
+  if (dragSelection && dragSelection.moved) {
+    renderSel(
+      {
+        chainId: dragSelection.chainId,
+        startPos: dragSelection.startPos,
+        endPos: dragSelection.currentPos,
+      },
+      0,
+      true
+    );
+  }
+
+  let regionTargetInfo = null;
+  const regionTarget = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  regionTarget.setAttribute('r', '8');
+  regionTarget.setAttribute('fill', '#1d4ed8');
+  regionTarget.setAttribute('opacity', '0.9');
+  regionTarget.style.display = 'none';
+  regionTarget.style.cursor = 'pointer';
+  regionTarget.addEventListener('click', (event) => {
+    if (!regionTargetInfo) return;
+    openSelectionMenuAt(event, regionTargetInfo.chainId, regionTargetInfo.pos);
+  });
+  targetGroup.appendChild(regionTarget);
+
+  const pickRegionTarget = (event) => {
+    const { x, y } = svgPoint(event);
+    const dx = x - cx;
+    const dy = y - cy;
+    const r = Math.hypot(dx, dy);
+    if (Math.abs(r - outerR) > 18) return null;
+    let ang = Math.atan2(dy, dx);
+    if (ang < 0) ang += Math.PI * 2;
+    const sorted = arcSelections.slice().sort((a, b) => b.id - a.id);
+    for (const sel of sorted) {
+      const chain = chainAngles.get(sel.chainId);
+      if (!chain) continue;
+      let adj = ang;
+      if (adj < chain.start) adj += Math.PI * 2;
+      if (adj < chain.start || adj > chain.end) continue;
+      const rawFrac = clamp((adj - chain.start) / (chain.end - chain.start), 0, 1);
+      let idx = clamp(Math.floor(rawFrac * chain.length) + 1, 1, chain.length);
+      if (chain.flip) idx = chain.length - idx + 1;
+      const [s, e] = normalizeRange(sel.startPos, sel.endPos);
+      if (idx < s || idx > e) continue;
+      const tx = cx + (outerR + 10) * Math.cos(ang);
+      const ty = cy + (outerR + 10) * Math.sin(ang);
+      return { chainId: sel.chainId, pos: idx, x: tx, y: ty };
+    }
+    return null;
+  };
+
+  svg.onmousemove = (event) => {
+    const found = pickRegionTarget(event);
+    if (!found) {
+      regionTargetInfo = null;
+      regionTarget.style.display = 'none';
+      return;
+    }
+    regionTargetInfo = found;
+    regionTarget.setAttribute('cx', found.x);
+    regionTarget.setAttribute('cy', found.y);
+    regionTarget.style.display = '';
+  };
+  svg.onmouseleave = () => {
+    regionTargetInfo = null;
+    regionTarget.style.display = 'none';
+  };
 
   for (const link of DATA.contacts) {
     const a = chainAngles.get(link.a);
@@ -1419,7 +1970,11 @@ function render() {
 
   svg.appendChild(linksGroup);
   svg.appendChild(arcsGroup);
+  svg.appendChild(selectionFillGroup);
+  svg.appendChild(selectionStrokeGroup);
+  svg.appendChild(targetGroup);
   svg.appendChild(overlayGroup);
+  svg.appendChild(calloutGroup);
   svg.appendChild(labelsGroup);
   return {
     linkCount: linksGroup.childNodes.length,
@@ -1475,10 +2030,68 @@ document.querySelectorAll('input[name="countMode"]').forEach((radio) => {
 });
 
 window.addEventListener('pointerup', () => {
+  if (activeCalloutDrag) {
+    activeCalloutDrag = null;
+  }
+  if (dragSelection) {
+    if (dragSelection.moved) {
+      const [s, e] = normalizeRange(dragSelection.startPos, dragSelection.currentPos);
+      arcSelections.push({
+        id: nextSelectionId++,
+        chainId: dragSelection.chainId,
+        startPos: s,
+        endPos: e,
+        color: null,
+        callout: false
+      });
+      suppressNextClick = true;
+    }
+    dragSelection = null;
+  }
   if (filterChain || filterResidue) {
     filterChain = null;
     filterResidue = null;
     safeRender();
+    return;
+  }
+  if (suppressNextClick) {
+    suppressNextClick = false;
+    safeRender();
+  }
+});
+
+window.addEventListener('pointermove', (event) => {
+  if (!activeCalloutDrag) return;
+  const p = svgPoint(event);
+  const sel = arcSelections.find((x) => x.id === activeCalloutDrag.id);
+  if (!sel || !sel.callout) return;
+  const dx = p.x - activeCalloutDrag.sx;
+  const dy = p.y - activeCalloutDrag.sy;
+  const c = sel.callout;
+  if (activeCalloutDrag.mode === 'move') {
+    c.x = activeCalloutDrag.ox + dx;
+    c.y = activeCalloutDrag.oy + dy;
+  } else {
+    let x = activeCalloutDrag.ox;
+    let y = activeCalloutDrag.oy;
+    let w = activeCalloutDrag.ow;
+    let h = activeCalloutDrag.oh;
+    if (activeCalloutDrag.mode.includes('e')) w = activeCalloutDrag.ow + dx;
+    if (activeCalloutDrag.mode.includes('s')) h = activeCalloutDrag.oh + dy;
+    if (activeCalloutDrag.mode.includes('w')) { w = activeCalloutDrag.ow - dx; x = activeCalloutDrag.ox + dx; }
+    if (activeCalloutDrag.mode.includes('n')) { h = activeCalloutDrag.oh - dy; y = activeCalloutDrag.oy + dy; }
+    c.x = x; c.y = y; c.w = w; c.h = h;
+  }
+  safeRender();
+});
+
+plotWrap.addEventListener('click', (event) => {
+  if (suppressNextClick) {
+    suppressNextClick = false;
+    return;
+  }
+  if (!selectionMenu.contains(event.target)) {
+    closeSelectionMenu();
   }
 });
 

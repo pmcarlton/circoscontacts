@@ -1,2 +1,12 @@
 __pycache__/
 *.pyc
+.DS_Store
+*.swp
+
+# ChimeraX plugin build artifacts
+chimerax_circoscontacts/build/
+chimerax_circoscontacts/dist/
+chimerax_circoscontacts/ChimeraX_CircosContacts.egg-info/
+
+# Tauri app runtime outputs
+tauri_mvp/src-tauri/runs/
