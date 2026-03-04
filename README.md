@@ -2,6 +2,8 @@
 
 Generate an interactive, presentation-quality circos-style plot from ChimeraX `.contacts` files and their corresponding AlphaFold/AF3 `.cif` models.
 
+[Homepage and documentation](https://circoscontacts.carltonlab.org)
+
 This tool:
 - Aggregates contacts across multiple `.contacts` files.
 - Treats DNA as a single duplex chromosome (base-pair positions), reversing one strand.
