@@ -64,7 +64,3 @@ Open the generated HTML in a browser. Controls allow:
 - Downloading SVG
  - Click-and-hold on an arc: show only contacts involving that chain
  - Shift-click-and-hold on an arc: show only contacts involving that residue
-
-## Notes
-
-This repository is intentionally scoped to the `tools/` directory only.
