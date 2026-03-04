@@ -658,6 +658,18 @@ button.secondary {
 .hint .orig-label {
   min-width: 22px;
   font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.hint .orig-label.locked {
+  color: #0b4ea2;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.hint .orig-label[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.6;
+  text-decoration: none;
 }
 .hint .name-input {
   flex: 1;
@@ -826,6 +838,11 @@ svg {
     <div class="control">
       <button id="downloadSvg">Download SVG</button>
       <button id="exportCxc" class="secondary" style="margin-left:8px;">ChimeraX Colors</button>
+      <div class="row" style="margin-top:8px;">
+        <button id="saveSession" class="secondary">Save Session</button>
+        <button id="loadSession" class="secondary">Load Session</button>
+        <input id="loadSessionFile" type="file" accept=".json,application/json" style="display:none;">
+      </div>
       <div class="status" id="renderStatus">Render status: pending</div>
     </div>
   </div>
@@ -856,6 +873,9 @@ const renderStatus = document.getElementById('renderStatus');
 const plotWrap = document.getElementById('plotWrap');
 const exportCxc = document.getElementById('exportCxc');
 const selectionMenu = document.getElementById('selectionMenu');
+const saveSessionBtn = document.getElementById('saveSession');
+const loadSessionBtn = document.getElementById('loadSession');
+const loadSessionFile = document.getElementById('loadSessionFile');
 
 const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
@@ -863,6 +883,7 @@ let currentOrder = defaultOrder.slice();
 const contactVisibility = new Map(DATA.chains.map(c => [c.id, true]));
 const chainFlip = new Map(DATA.chains.map(c => [c.id, false]));
 const chainDisplayName = new Map(DATA.chains.map(c => [c.id, c.id]));
+let lockedBottomChain = null;
 let countMode = 'atom';
 
 let filterChain = null;
@@ -922,6 +943,8 @@ function updateOrderHint(order, invalid) {
     const cls = inOrder ? '' : 'hidden-chain';
     const checked = inOrder && contactVisibility.get(c.id) !== false ? 'checked' : '';
     const disabled = inOrder ? '' : 'disabled';
+    const labelDisabled = inOrder ? '' : 'aria-disabled="true"';
+    const locked = lockedBottomChain === c.id ? 'locked' : '';
     const flipped = chainFlip.get(c.id) ? 'active' : '';
     const symbol = chainFlip.get(c.id) ? '◀' : '▶';
     const flipDisabled = inOrder ? '' : 'aria-disabled="true"';
@@ -929,7 +952,7 @@ function updateOrderHint(order, invalid) {
     const flipColor = c.color || '#475569';
     return `<div class="chain-toggle ${cls}">
       <input type="checkbox" data-role="contacts" data-chain="${c.id}" ${checked} ${disabled}>
-      <span class="orig-label">${c.id}</span>
+      <span class="orig-label ${locked}" data-role="lock" data-chain="${c.id}" ${labelDisabled} title="Lock this chain midpoint at the bottom">${c.id}</span>
       <span class="flip-toggle ${flipped}" data-role="flip" data-chain="${c.id}" style="color:${flipColor}" ${flipDisabled}>${symbol}</span>
       <input class="name-input" type="text" data-role="name" data-chain="${c.id}" value="${displayName}" ${disabled}>
     </div>`;
@@ -955,6 +978,16 @@ function updateOrderHint(order, invalid) {
       const chainId = target.getAttribute('data-chain');
       const next = !(chainFlip.get(chainId) === true);
       chainFlip.set(chainId, next);
+      safeRender();
+    });
+  });
+  orderHint.querySelectorAll('.orig-label[data-role="lock"]').forEach((node) => {
+    node.addEventListener('click', (event) => {
+      const target = event.currentTarget;
+      if (target.getAttribute('aria-disabled') === 'true') return;
+      const chainId = target.getAttribute('data-chain');
+      if (!chainId || !chainMap.has(chainId)) return;
+      lockedBottomChain = chainId;
       safeRender();
     });
   });
@@ -1239,17 +1272,29 @@ function wrapLines(text, maxWidthPx) {
       out.push('');
       continue;
     }
-    let line = words[0];
-    for (let i = 1; i < words.length; i += 1) {
-      const next = `${line} ${words[i]}`;
-      if (next.length <= maxChars) {
-        line = next;
-      } else {
+    let line = '';
+    for (const rawWord of words) {
+      let word = rawWord;
+      while (word.length > maxChars) {
+        if (line.length) {
+          out.push(line);
+          line = '';
+        }
+        out.push(word.slice(0, maxChars));
+        word = word.slice(maxChars);
+      }
+      if (!line.length) {
+        line = word;
+        continue;
+      }
+      const next = `${line} ${word}`;
+      if (next.length <= maxChars) line = next;
+      else {
         out.push(line);
-        line = words[i];
+        line = word;
       }
     }
-    out.push(line);
+    if (line.length || !words.length) out.push(line);
   }
   return out.length ? out : [''];
 }
@@ -1260,15 +1305,28 @@ function nearestPointOnRect(x, y, rx, ry, rw, rh) {
   return [nx, ny];
 }
 
+function sanitizeEditableHtml(html) {
+  const holder = document.createElement('div');
+  holder.innerHTML = String(html || '');
+  holder.querySelectorAll('script,style,iframe,object,embed').forEach((n) => n.remove());
+  return holder.innerHTML;
+}
+
+function calloutRangeTitle(sel) {
+  const [a, b] = normalizeRange(sel.startPos, sel.endPos);
+  return `${a}\u2013${b}`;
+}
+
 function render() {
   const parsed = parseOrder(orderInput.value);
   let order = parsed.order;
-  if (!order.length) {
+  const usingDefaultOrder = !order.length;
+  if (usingDefaultOrder) {
     order = defaultOrder.slice();
-    updateOrderHint(order, parsed.invalid.length ? parsed.invalid : ['(none)']);
-  } else {
-    updateOrderHint(order, parsed.invalid);
   }
+  if (lockedBottomChain && !order.includes(lockedBottomChain)) lockedBottomChain = null;
+  if (usingDefaultOrder) updateOrderHint(order, parsed.invalid.length ? parsed.invalid : ['(none)']);
+  else updateOrderHint(order, parsed.invalid);
   currentOrder = order.slice();
   for (const chainId of order) {
     if (!contactVisibility.has(chainId)) {
@@ -1284,7 +1342,6 @@ function render() {
   }
   const gapDeg = 2;
   const gap = gapDeg * Math.PI / 180;
-  const angleOffset = Number(angle.value) * Math.PI / 180;
   const thresholdValue = Number(threshold.value);
   const maxStroke = Number(maxWidth.value);
   const zoomValue = Number(zoom.value);
@@ -1305,6 +1362,16 @@ function render() {
   const totalLength = order.reduce((sum, id) => sum + chainMap.get(id).length, 0);
   const available = 2 * Math.PI - gap * order.length;
   const scale = available / totalLength;
+  let angleOffset = Number(angle.value) * Math.PI / 180;
+  if (lockedBottomChain && order.includes(lockedBottomChain)) {
+    let prefix = 0;
+    for (const id of order) {
+      if (id === lockedBottomChain) break;
+      prefix += chainMap.get(id).length * scale + gap;
+    }
+    const halfSpan = chainMap.get(lockedBottomChain).length * scale * 0.5;
+    angleOffset = (Math.PI / 2) - (prefix + halfSpan);
+  }
 
   const chainAngles = new Map();
   let cursor = angleOffset;
@@ -1557,18 +1624,25 @@ function render() {
         if (act === 'callout') {
           const text = selectionSequenceText(selObj);
           if (!text) return;
-          selObj.callout = selObj.callout || { kind: 'sequence', text, x: null, y: null, w: 180, h: 44 };
+          selObj.callout = selObj.callout || { kind: 'sequence', text, html: '', x: null, y: null, w: 220, h: 80, title: '' };
           selObj.callout.kind = 'sequence';
           selObj.callout.text = text;
+          selObj.callout.html = '';
+          selObj.callout.title = calloutRangeTitle(selObj);
         } else if (act === 'comment') {
-          selObj.callout = selObj.callout || { kind: 'comment', text: '', x: null, y: null, w: 220, h: 80 };
+          selObj.callout = selObj.callout || { kind: 'comment', text: '', html: '', x: null, y: null, w: 220, h: 80, title: 'Comment' };
           selObj.callout.kind = 'comment';
           selObj.callout.text = selObj.comment || selObj.callout.text || '';
+          selObj.callout.html = selObj.callout.html || '';
+          selObj.callout.title = selObj.callout.title || 'Comment';
         } else if (act === 'autotrim') {
           const trimmed = trimSelectionToContacts(selObj, thresholdValue, visibleChains);
           if (trimmed) {
             selObj.startPos = trimmed[0];
             selObj.endPos = trimmed[1];
+            if (selObj.callout && selObj.callout.kind === 'sequence') {
+              selObj.callout.title = calloutRangeTitle(selObj);
+            }
           }
         } else if (act === 'applyEdit') {
           const maxLen = chainMap.get(selObj.chainId).length;
@@ -1577,6 +1651,9 @@ function render() {
           if (s <= e) {
             selObj.startPos = s;
             selObj.endPos = e;
+            if (selObj.callout && selObj.callout.kind === 'sequence') {
+              selObj.callout.title = calloutRangeTitle(selObj);
+            }
           }
         } else if (act === 'clear') {
           arcSelections = arcSelections.filter((x) => x.id !== idVal);
@@ -1650,11 +1727,23 @@ function render() {
         callout.y = clamp(ayRaw - callout.h / 2, 0, CANVAS_H - callout.h);
       }
       const width = clamp(callout.w || 220, 80, 760);
+      const seqDefault = selectionSequenceText(sel) || `${sel.chainId}:${sel.startPos}-${sel.endPos}`;
+      if (callout.kind === 'sequence' && !callout.text) {
+        callout.text = seqDefault;
+      }
+      if (callout.kind === 'sequence' && !callout.title) {
+        callout.title = calloutRangeTitle(sel);
+      }
       const textVal = callout.kind === 'comment'
         ? (callout.text || '')
-        : (selectionSequenceText(sel) || `${sel.chainId}:${sel.startPos}-${sel.endPos}`);
-      const lines = wrapLines(textVal, width - 4);
-      const minH = lines.length * 14 + 8;
+        : (callout.text || seqDefault);
+      const htmlVal = callout.html && callout.html.length
+        ? callout.html
+        : escapeHtml(textVal).replace(/\\n/g, '<br>');
+      const titleText = callout.kind === 'sequence'
+        ? (callout.title || calloutRangeTitle(sel))
+        : (callout.title || 'Comment');
+      const minH = 40;
       const height = clamp(Math.max(callout.h || minH, minH), minH, 620);
       const boxX = clamp(callout.x, 0, CANVAS_W - width);
       const boxY = clamp(callout.y, 0, CANVAS_H - height);
@@ -1701,11 +1790,23 @@ function render() {
       });
       calloutGroup.appendChild(dragHandle);
 
+      const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      title.setAttribute('x', boxX + 6);
+      title.setAttribute('y', boxY + 11);
+      title.setAttribute('fill', '#334155');
+      title.setAttribute('font-size', '11');
+      title.setAttribute('font-weight', '600');
+      title.setAttribute('font-family', 'IBM Plex Sans, sans-serif');
+      title.textContent = titleText;
+      title.setAttribute('pointer-events', 'none');
+      calloutGroup.appendChild(title);
+
       const fo = document.createElementNS('http://www.w3.org/2000/svg', 'foreignObject');
       fo.setAttribute('x', boxX + 2);
       fo.setAttribute('y', boxY + 16);
       fo.setAttribute('width', `${Math.max(4, width - 4)}`);
       fo.setAttribute('height', `${Math.max(4, height - 18)}`);
+      fo.setAttribute('data-export-text', encodeURIComponent(sel.callout.text || ''));
       const div = document.createElement('div');
       div.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
       div.setAttribute(
@@ -1714,12 +1815,15 @@ function render() {
         + 'font:12px \"IBM Plex Sans\",sans-serif;color:#0f172a;outline:none;padding:0;margin:0;'
       );
       div.contentEditable = 'true';
-      div.textContent = textVal;
+      div.innerHTML = htmlVal;
       div.addEventListener('pointerdown', (ev) => ev.stopPropagation());
       div.addEventListener('input', () => {
+        sel.callout.html = sanitizeEditableHtml(div.innerHTML);
         sel.callout.text = div.innerText;
+        fo.setAttribute('data-export-text', encodeURIComponent(sel.callout.text || ''));
         if (sel.callout.kind !== 'comment' && sel.callout.text !== selectionSequenceText(sel)) {
           sel.callout.kind = 'comment';
+          sel.callout.title = sel.callout.title || 'Comment';
           sel.comment = sel.callout.text;
         }
         if (sel.callout.kind === 'comment') {
@@ -1905,28 +2009,152 @@ function safeRender() {
     } else if (filterChain) {
       filterNote = ` Filtered: ${filterChain}.`;
     }
-    renderStatus.textContent = `Rendered ${stats.linkCount} links across ${stats.chainCount} chains.${filterNote}`;
+    const lockNote = lockedBottomChain ? ` Locked bottom: ${lockedBottomChain}.` : '';
+    renderStatus.textContent = `Rendered ${stats.linkCount} links across ${stats.chainCount} chains.${filterNote}${lockNote}`;
   } catch (err) {
     renderStatus.textContent = `Render error: ${err.message}`;
     console.error(err);
   }
 }
 
-function syncRange(range, input) {
+function buildSessionState() {
+  return {
+    schema: 'contacts-circos-session-v1',
+    controls: {
+      threshold: Number(threshold.value),
+      maxWidth: Number(maxWidth.value),
+      angle: Number(angle.value),
+      zoom: Number(zoom.value),
+      labelSize: Number(labelSize.value),
+      countMode,
+      orderText: orderInput.value,
+      lockedBottomChain
+    },
+    chain: {
+      contactVisibility: Object.fromEntries(contactVisibility.entries()),
+      flip: Object.fromEntries(chainFlip.entries()),
+      displayName: Object.fromEntries(chainDisplayName.entries())
+    },
+    selections: arcSelections.map((sel) => ({
+      id: sel.id,
+      chainId: sel.chainId,
+      startPos: sel.startPos,
+      endPos: sel.endPos,
+      color: sel.color ?? null,
+      comment: sel.comment ?? '',
+      callout: sel.callout
+        ? {
+            kind: sel.callout.kind || 'comment',
+            title: sel.callout.title || '',
+            text: sel.callout.text || '',
+            html: sel.callout.html || '',
+            x: sel.callout.x ?? null,
+            y: sel.callout.y ?? null,
+            w: sel.callout.w ?? null,
+            h: sel.callout.h ?? null
+          }
+        : null
+    }))
+  };
+}
+
+function applySessionState(state) {
+  if (!state || state.schema !== 'contacts-circos-session-v1') {
+    throw new Error('Unsupported session file');
+  }
+  const controls = state.controls || {};
+  threshold.value = clamp(Number(controls.threshold ?? threshold.value), Number(threshold.min), Number(threshold.max));
+  thresholdInput.value = threshold.value;
+  maxWidth.value = clamp(Number(controls.maxWidth ?? maxWidth.value), Number(maxWidth.min), Number(maxWidth.max));
+  maxWidthInput.value = maxWidth.value;
+  angle.value = clamp(Number(controls.angle ?? angle.value), Number(angle.min), Number(angle.max));
+  angleInput.value = angle.value;
+  zoom.value = clamp(Number(controls.zoom ?? zoom.value), Number(zoom.min), Number(zoom.max));
+  zoomInput.value = zoom.value;
+  labelSize.value = clamp(Number(controls.labelSize ?? labelSize.value), Number(labelSize.min), Number(labelSize.max));
+  labelSizeInput.value = labelSize.value;
+  if (controls.countMode === 'atom' || controls.countMode === 'residue') {
+    countMode = controls.countMode;
+  }
+  if (typeof controls.lockedBottomChain === 'string' && chainMap.has(controls.lockedBottomChain)) {
+    lockedBottomChain = controls.lockedBottomChain;
+  } else {
+    lockedBottomChain = null;
+  }
+  document.querySelectorAll('input[name="countMode"]').forEach((radio) => {
+    radio.checked = radio.value === countMode;
+  });
+  orderInput.value = typeof controls.orderText === 'string' ? controls.orderText : defaultOrder.join(', ');
+
+  const chainState = state.chain || {};
+  const vis = chainState.contactVisibility || {};
+  const flip = chainState.flip || {};
+  const names = chainState.displayName || {};
+  for (const chain of DATA.chains) {
+    const id = chain.id;
+    contactVisibility.set(id, vis[id] !== false);
+    chainFlip.set(id, flip[id] === true);
+    chainDisplayName.set(id, typeof names[id] === 'string' && names[id].trim() ? names[id] : id);
+  }
+
+  const loadedSelections = [];
+  const inputSelections = Array.isArray(state.selections) ? state.selections : [];
+  for (const raw of inputSelections) {
+    if (!raw || !chainMap.has(raw.chainId)) continue;
+    const maxLen = chainMap.get(raw.chainId).length;
+    const s = clamp(Number(raw.startPos), 1, maxLen);
+    const e = clamp(Number(raw.endPos), 1, maxLen);
+    if (!Number.isFinite(s) || !Number.isFinite(e)) continue;
+    const sel = {
+      id: Number(raw.id) || nextSelectionId++,
+      chainId: raw.chainId,
+      startPos: Math.min(s, e),
+      endPos: Math.max(s, e),
+      color: raw.color || null,
+      comment: typeof raw.comment === 'string' ? raw.comment : '',
+      callout: null
+    };
+    if (raw.callout && typeof raw.callout === 'object') {
+      sel.callout = {
+        kind: raw.callout.kind === 'sequence' ? 'sequence' : 'comment',
+        title: typeof raw.callout.title === 'string' ? raw.callout.title : '',
+        text: typeof raw.callout.text === 'string' ? raw.callout.text : '',
+        html: typeof raw.callout.html === 'string' ? raw.callout.html : '',
+        x: Number.isFinite(raw.callout.x) ? Number(raw.callout.x) : null,
+        y: Number.isFinite(raw.callout.y) ? Number(raw.callout.y) : null,
+        w: Number.isFinite(raw.callout.w) ? Number(raw.callout.w) : null,
+        h: Number.isFinite(raw.callout.h) ? Number(raw.callout.h) : null
+      };
+    }
+    loadedSelections.push(sel);
+  }
+  arcSelections = loadedSelections;
+  nextSelectionId = Math.max(1, ...arcSelections.map((x) => Number(x.id) || 0)) + 1;
+  closeSelectionMenu();
+  filterChain = null;
+  filterResidue = null;
+  safeRender();
+}
+
+function syncRange(range, input, onUserChange = null) {
   range.addEventListener('input', () => {
     input.value = range.value;
+    if (typeof onUserChange === 'function') onUserChange();
     safeRender();
   });
   input.addEventListener('change', () => {
     range.value = clamp(Number(input.value), Number(range.min), Number(range.max));
     input.value = range.value;
+    if (typeof onUserChange === 'function') onUserChange();
     safeRender();
   });
 }
 
 syncRange(threshold, thresholdInput);
 syncRange(maxWidth, maxWidthInput);
-syncRange(angle, angleInput);
+syncRange(angle, angleInput, () => {
+  if (lockedBottomChain) lockedBottomChain = null;
+});
 syncRange(zoom, zoomInput);
 syncRange(labelSize, labelSizeInput);
 
@@ -2009,9 +2237,71 @@ plotWrap.addEventListener('click', (event) => {
   }
 });
 
+saveSessionBtn.addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify(buildSessionState(), null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'contacts_circos_session.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
+loadSessionBtn.addEventListener('click', () => {
+  loadSessionFile.value = '';
+  loadSessionFile.click();
+});
+
+loadSessionFile.addEventListener('change', async () => {
+  const file = loadSessionFile.files && loadSessionFile.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const obj = JSON.parse(text);
+    applySessionState(obj);
+    renderStatus.textContent = 'Session loaded.';
+  } catch (err) {
+    renderStatus.textContent = `Session load error: ${err.message}`;
+  }
+});
+
 document.getElementById('downloadSvg').addEventListener('click', () => {
+  const ns = 'http://www.w3.org/2000/svg';
+  const exportSvg = svg.cloneNode(true);
+  exportSvg.querySelectorAll('foreignObject').forEach((fo) => {
+    const x = Number(fo.getAttribute('x') || 0);
+    const y = Number(fo.getAttribute('y') || 0);
+    const w = Number(fo.getAttribute('width') || 120);
+    const h = Number(fo.getAttribute('height') || 40);
+    const encoded = fo.getAttribute('data-export-text') || '';
+    const textVal = decodeURIComponent(encoded);
+    let lines = wrapLines(textVal, Math.max(10, w - 4));
+    const maxLines = Math.max(1, Math.floor((h - 2) / 14));
+    if (lines.length > maxLines) {
+      lines = lines.slice(0, maxLines);
+      const tail = lines[maxLines - 1] || '';
+      lines[maxLines - 1] = tail.length > 3
+        ? `${tail.slice(0, tail.length - 3)}...`
+        : '...';
+    }
+    const text = document.createElementNS(ns, 'text');
+    text.setAttribute('fill', '#0f172a');
+    text.setAttribute('font-size', '12');
+    text.setAttribute('font-family', 'IBM Plex Sans, sans-serif');
+    lines.forEach((line, idx) => {
+      const t = document.createElementNS(ns, 'tspan');
+      t.setAttribute('x', `${x + 2}`);
+      t.setAttribute('y', `${y + 12 + idx * 14}`);
+      t.textContent = line;
+      text.appendChild(t);
+    });
+    fo.parentNode.insertBefore(text, fo.nextSibling);
+    fo.remove();
+  });
   const serializer = new XMLSerializer();
-  const svgString = serializer.serializeToString(svg);
+  const svgString = serializer.serializeToString(exportSvg);
   const blob = new Blob([svgString], {type: 'image/svg+xml'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -2092,7 +2382,7 @@ safeRender();
         .replace("__DEFAULT_ORDER__", ", ".join(default_order))
         .replace("__DATA_JSON__", data_json)
     )
-    output_path.write_text(html)
+    output_path.write_text(html, encoding="utf-8")
 
 
 def main() -> None:
