@@ -787,6 +787,10 @@ svg {
     <h1>__TITLE__</h1>
     <div class="subtitle">Interactive circos view of aggregated ChimeraX contacts.</div>
     <div class="control">
+      <label for="plotTitle">Plot title</label>
+      <input id="plotTitle" type="text" value="__TITLE__">
+    </div>
+    <div class="control">
       <label for="threshold">Minimum contact visibility threshold</label>
       <div class="row">
         <input id="threshold" type="range" min="0" max="__MAX_COUNT__" step="1" value="2">
@@ -815,13 +819,6 @@ svg {
       </div>
     </div>
     <div class="control">
-      <label for="zoom">Zoom</label>
-      <div class="row">
-        <input id="zoom" type="range" min="0.6" max="1.6" step="0.05" value="1">
-        <input id="zoomInput" type="number" min="0.6" max="1.6" step="0.05" value="1">
-      </div>
-    </div>
-    <div class="control">
       <label for="order">Chain Presence/Order</label>
       <input id="order" type="text" value="__DEFAULT_ORDER__">
       <div class="row" style="margin-top:8px;">
@@ -837,6 +834,7 @@ svg {
     </div>
     <div class="control">
       <button id="downloadSvg">Download SVG</button>
+      <button id="saveHtml" class="secondary" style="margin-left:8px;">Save HTML</button>
       <button id="exportCxc" class="secondary" style="margin-left:8px;">ChimeraX Colors</button>
       <div class="row" style="margin-top:8px;">
         <button id="saveSession" class="secondary">Save Session</button>
@@ -863,19 +861,19 @@ const maxWidth = document.getElementById('maxWidth');
 const maxWidthInput = document.getElementById('maxWidthInput');
 const angle = document.getElementById('angle');
 const angleInput = document.getElementById('angleInput');
-const zoom = document.getElementById('zoom');
-const zoomInput = document.getElementById('zoomInput');
 const labelSize = document.getElementById('labelSize');
 const labelSizeInput = document.getElementById('labelSizeInput');
 const orderInput = document.getElementById('order');
 const orderHint = document.getElementById('orderHint');
 const renderStatus = document.getElementById('renderStatus');
 const plotWrap = document.getElementById('plotWrap');
+const saveHtml = document.getElementById('saveHtml');
 const exportCxc = document.getElementById('exportCxc');
 const selectionMenu = document.getElementById('selectionMenu');
 const saveSessionBtn = document.getElementById('saveSession');
 const loadSessionBtn = document.getElementById('loadSession');
 const loadSessionFile = document.getElementById('loadSessionFile');
+const plotTitleInput = document.getElementById('plotTitle');
 
 const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
@@ -1050,6 +1048,16 @@ function arcPath(cx, cy, rOuter, rInner, start, end) {
   ].join(' ');
 }
 
+function arcLinePath(cx, cy, r, start, end, reverse = false) {
+  const s = reverse ? end : start;
+  const e = reverse ? start : end;
+  const [x1, y1] = polar(cx, cy, r, s);
+  const [x2, y2] = polar(cx, cy, r, e);
+  const largeArc = Math.abs(end - start) > Math.PI ? 1 : 0;
+  const sweep = reverse ? 0 : 1;
+  return `M ${x1} ${y1} A ${r} ${r} 0 ${largeArc} ${sweep} ${x2} ${y2}`;
+}
+
 function styledArcPath(cx, cy, outerR, innerR, start, end, startAtStart, flare, flareAngle) {
   const rCap = (outerR - innerR) / 2;
   const midR = (outerR + innerR) / 2;
@@ -1131,24 +1139,31 @@ function lightenHexColor(hex, amount = 0.45) {
 }
 
 function svgPoint(event) {
+  if (typeof svg.createSVGPoint === 'function' && svg.getScreenCTM) {
+    const pt = svg.createSVGPoint();
+    pt.x = event.clientX;
+    pt.y = event.clientY;
+    const ctm = svg.getScreenCTM();
+    if (ctm) {
+      const p = pt.matrixTransform(ctm.inverse());
+      return { x: p.x, y: p.y };
+    }
+  }
   const rect = svg.getBoundingClientRect();
   const vb = svg.viewBox.baseVal;
-  const x = (event.clientX - rect.left) * (vb.width / rect.width);
-  const y = (event.clientY - rect.top) * (vb.height / rect.height);
-  return { x, y };
+  return {
+    x: (event.clientX - rect.left) * (vb.width / rect.width),
+    y: (event.clientY - rect.top) * (vb.height / rect.height)
+  };
 }
 
 function positionTooltip(event) {
   const rect = plotWrap.getBoundingClientRect();
-  const fontSize = parseFloat(getComputedStyle(document.body).fontSize) || 16;
-  const offset = fontSize * 10;
-  let x = event.clientX - rect.left + offset;
-  let y = event.clientY - rect.top + offset * 0.6;
   const tt = tooltip.getBoundingClientRect();
+  let x = (rect.width - tt.width) / 2;
+  let y = (rect.height - tt.height) / 2;
   const maxX = rect.width - tt.width - 8;
   const maxY = rect.height - tt.height - 8;
-  if (x > maxX) x = event.clientX - rect.left - offset - tt.width;
-  if (y > maxY) y = event.clientY - rect.top - offset - tt.height;
   x = clamp(x, 8, Math.max(8, maxX));
   y = clamp(y, 8, Math.max(8, maxY));
   tooltip.style.left = `${x}px`;
@@ -1174,6 +1189,14 @@ function residueAtEvent(chain, chainMeta, event, cx, cy) {
 
 function normalizeRange(startPos, endPos) {
   return [Math.min(startPos, endPos), Math.max(startPos, endPos)];
+}
+
+function linkMatchesSelection(link, sel) {
+  const [s, e] = normalizeRange(sel.startPos, sel.endPos);
+  return (
+    (link.a === sel.chainId && link.a_pos >= s && link.a_pos <= e) ||
+    (link.b === sel.chainId && link.b_pos >= s && link.b_pos <= e)
+  );
 }
 
 function selectionLength(sel) {
@@ -1344,11 +1367,12 @@ function render() {
   const gap = gapDeg * Math.PI / 180;
   const thresholdValue = Number(threshold.value);
   const maxStroke = Number(maxWidth.value);
-  const zoomValue = Number(zoom.value);
-  const availW = Math.max(320, Math.floor(plotWrap.clientWidth - 20));
-  const availH = Math.max(320, Math.floor(plotWrap.clientHeight - 20));
+  const wrapRect = plotWrap.getBoundingClientRect();
+  const availW = Math.max(320, Math.floor(wrapRect.width - 20));
+  const availH = Math.max(320, Math.floor(wrapRect.height - 20));
   const fitScale = Math.min(availW / CANVAS_W, availH / CANVAS_H);
-  const renderScale = Math.max(0.2, fitScale * zoomValue);
+  // Keep callout text legible (~8pt+) while still auto-fitting the plot.
+  const renderScale = Math.max(0.9, fitScale * 1.2);
   const svgW = Math.floor(CANVAS_W * renderScale);
   const svgH = Math.floor(CANVAS_H * renderScale);
   const minStroke = 0.2;
@@ -1404,9 +1428,24 @@ function render() {
   const calloutGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const linksGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const labelsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const labelDefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
   const overlayGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const targetGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   overlayGroup.setAttribute('pointer-events', 'none');
+
+  const plotTitle = (plotTitleInput.value || '').trim();
+  if (plotTitle) {
+    const titleNode = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    titleNode.setAttribute('x', `${cx}`);
+    titleNode.setAttribute('y', '38');
+    titleNode.setAttribute('text-anchor', 'middle');
+    titleNode.setAttribute('fill', '#0f172a');
+    titleNode.setAttribute('font-size', '24');
+    titleNode.setAttribute('font-weight', '700');
+    titleNode.setAttribute('font-family', 'IBM Plex Sans, sans-serif');
+    titleNode.textContent = plotTitle;
+    svg.appendChild(titleNode);
+  }
 
   const displayPos = (chainId, pos) => {
     const chain = chainAngles.get(chainId);
@@ -1549,15 +1588,24 @@ function render() {
     arcsGroup.appendChild(path);
 
     const mid = (chain.start + chain.end) / 2;
-    const [tx, ty] = polar(cx, cy, outerR + 18, mid);
+    const reverse = Math.sin(mid) > 0;
+    const labelPathId = `label-path-${id.replace(/[^A-Za-z0-9_-]/g, '_')}-${Math.round(chain.start * 1000)}`;
+    const labelPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    labelPath.setAttribute('id', labelPathId);
+    labelPath.setAttribute('d', arcLinePath(cx, cy, outerR + 10, chain.start, chain.end, reverse));
+    labelDefs.appendChild(labelPath);
     const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    label.setAttribute('x', tx);
-    label.setAttribute('y', ty);
     label.setAttribute('fill', '#0f172a');
     label.setAttribute('font-size', labelSize.value);
     label.setAttribute('font-weight', '600');
     label.setAttribute('text-anchor', 'middle');
-    label.textContent = chainDisplayName.get(id) || id;
+    label.setAttribute('dominant-baseline', 'middle');
+    const textPath = document.createElementNS('http://www.w3.org/2000/svg', 'textPath');
+    textPath.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', `#${labelPathId}`);
+    textPath.setAttribute('href', `#${labelPathId}`);
+    textPath.setAttribute('startOffset', '50%');
+    textPath.textContent = chainDisplayName.get(id) || id;
+    label.appendChild(textPath);
     labelsGroup.appendChild(label);
   }
 
@@ -1603,6 +1651,11 @@ function render() {
           <div class="menu-row">
             <span style="font-size:12px;color:#334155;">Color</span>
             <input type="color" data-action="color" data-id="${item.id}" value="${item.color || chainMap.get(item.chainId).color}">
+          </div>
+          <div class="menu-row">
+            <span style="font-size:12px;color:#334155;">Link color</span>
+            <input type="color" data-action="linkColor" data-id="${item.id}" value="${item.linkColor || '#0f172a'}">
+            <button data-action="clearLinkColor" data-id="${item.id}">Default</button>
           </div>
         </div>
       `;
@@ -1657,6 +1710,8 @@ function render() {
           }
         } else if (act === 'clear') {
           arcSelections = arcSelections.filter((x) => x.id !== idVal);
+        } else if (act === 'clearLinkColor') {
+          selObj.linkColor = null;
         }
         closeSelectionMenu();
         safeRender();
@@ -1671,6 +1726,8 @@ function render() {
           if (!selObj) return;
           if (act === 'color') {
             selObj.color = evt.currentTarget.value;
+          } else if (act === 'linkColor') {
+            selObj.linkColor = evt.currentTarget.value;
           } else if (act === 'start' || act === 'startRange') {
             const v = clamp(Number(evt.currentTarget.value), 1, chainMap.get(selObj.chainId).length);
             selObj._editStart = v;
@@ -1952,7 +2009,12 @@ function render() {
     const eased = Math.pow(t, 0.65);
     const alpha = minAlpha + (maxAlpha - minAlpha) * eased;
     const width = minStroke + (maxStroke - minStroke) * eased;
-    const color = mixColor(a.color, b.color);
+    let overrideColor = null;
+    for (const sel of arcSelections) {
+      if (!sel.linkColor) continue;
+      if (linkMatchesSelection(link, sel)) overrideColor = sel.linkColor;
+    }
+    const color = overrideColor || mixColor(a.color, b.color);
 
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', `M ${x1} ${y1} C ${c1x} ${c1y} ${c2x} ${c2y} ${x2} ${y2}`);
@@ -1993,6 +2055,7 @@ function render() {
   svg.appendChild(targetGroup);
   svg.appendChild(overlayGroup);
   svg.appendChild(calloutGroup);
+  svg.appendChild(labelDefs);
   svg.appendChild(labelsGroup);
   return {
     linkCount: linksGroup.childNodes.length,
@@ -2019,12 +2082,12 @@ function safeRender() {
 
 function buildSessionState() {
   return {
-    schema: 'contacts-circos-session-v1',
+    schema: 'contacts-circos-session-v2',
     controls: {
+      plotTitle: plotTitleInput.value,
       threshold: Number(threshold.value),
       maxWidth: Number(maxWidth.value),
       angle: Number(angle.value),
-      zoom: Number(zoom.value),
       labelSize: Number(labelSize.value),
       countMode,
       orderText: orderInput.value,
@@ -2041,6 +2104,7 @@ function buildSessionState() {
       startPos: sel.startPos,
       endPos: sel.endPos,
       color: sel.color ?? null,
+      linkColor: sel.linkColor ?? null,
       comment: sel.comment ?? '',
       callout: sel.callout
         ? {
@@ -2059,18 +2123,17 @@ function buildSessionState() {
 }
 
 function applySessionState(state) {
-  if (!state || state.schema !== 'contacts-circos-session-v1') {
+  if (!state || !['contacts-circos-session-v1', 'contacts-circos-session-v2'].includes(state.schema)) {
     throw new Error('Unsupported session file');
   }
   const controls = state.controls || {};
+  plotTitleInput.value = typeof controls.plotTitle === 'string' ? controls.plotTitle : (DATA.title || '');
   threshold.value = clamp(Number(controls.threshold ?? threshold.value), Number(threshold.min), Number(threshold.max));
   thresholdInput.value = threshold.value;
   maxWidth.value = clamp(Number(controls.maxWidth ?? maxWidth.value), Number(maxWidth.min), Number(maxWidth.max));
   maxWidthInput.value = maxWidth.value;
   angle.value = clamp(Number(controls.angle ?? angle.value), Number(angle.min), Number(angle.max));
   angleInput.value = angle.value;
-  zoom.value = clamp(Number(controls.zoom ?? zoom.value), Number(zoom.min), Number(zoom.max));
-  zoomInput.value = zoom.value;
   labelSize.value = clamp(Number(controls.labelSize ?? labelSize.value), Number(labelSize.min), Number(labelSize.max));
   labelSizeInput.value = labelSize.value;
   if (controls.countMode === 'atom' || controls.countMode === 'residue') {
@@ -2111,6 +2174,7 @@ function applySessionState(state) {
       startPos: Math.min(s, e),
       endPos: Math.max(s, e),
       color: raw.color || null,
+      linkColor: raw.linkColor || null,
       comment: typeof raw.comment === 'string' ? raw.comment : '',
       callout: null
     };
@@ -2155,8 +2219,8 @@ syncRange(maxWidth, maxWidthInput);
 syncRange(angle, angleInput, () => {
   if (lockedBottomChain) lockedBottomChain = null;
 });
-syncRange(zoom, zoomInput);
 syncRange(labelSize, labelSizeInput);
+plotTitleInput.addEventListener('input', () => safeRender());
 
 document.getElementById('applyOrder').addEventListener('click', () => safeRender());
 document.getElementById('resetOrder').addEventListener('click', () => {
@@ -2172,6 +2236,7 @@ document.querySelectorAll('input[name="countMode"]').forEach((radio) => {
 });
 
 window.addEventListener('pointerup', () => {
+  let createdSelection = false;
   if (activeCalloutDrag) {
     activeCalloutDrag = null;
   }
@@ -2186,6 +2251,7 @@ window.addEventListener('pointerup', () => {
         color: null,
         callout: false
       });
+      createdSelection = true;
       suppressNextClick = true;
     }
     dragSelection = null;
@@ -2196,9 +2262,13 @@ window.addEventListener('pointerup', () => {
     safeRender();
     return;
   }
+  if (createdSelection) {
+    safeRender();
+    return;
+  }
   if (suppressNextClick) {
     suppressNextClick = false;
-    safeRender();
+    return;
   }
 });
 
@@ -2313,6 +2383,22 @@ document.getElementById('downloadSvg').addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 
+saveHtml.addEventListener('click', () => {
+  const state = buildSessionState();
+  const stateJson = JSON.stringify(state);
+  const docClone = document.documentElement.cloneNode(true);
+  docClone.setAttribute('data-saved-session', encodeURIComponent(stateJson));
+  const html = '<!doctype html>\\n' + docClone.outerHTML;
+  const blob = new Blob([html], {type: 'text/html;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'contacts_circos.html';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+});
+
 exportCxc.addEventListener('click', () => {
   const thresholdValue = Number(threshold.value);
   const visible = new Set(currentOrder);
@@ -2371,7 +2457,37 @@ exportCxc.addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 
-safeRender();
+function applyEmbeddedSavedSessionIfPresent() {
+  const attr = document.documentElement.getAttribute('data-saved-session');
+  if (attr) {
+    try {
+      const obj = JSON.parse(decodeURIComponent(attr));
+      applySessionState(obj);
+      renderStatus.textContent = 'Session restored from saved HTML.';
+      return true;
+    } catch (err) {
+      renderStatus.textContent = `Saved HTML load error: ${err.message}`;
+      console.error(err);
+      return false;
+    }
+  }
+  const node = document.getElementById('savedSessionData');
+  if (!node) return false;
+  try {
+    const obj = JSON.parse(node.textContent || '{}');
+    applySessionState(obj);
+    renderStatus.textContent = 'Session restored from saved HTML.';
+    return true;
+  } catch (err) {
+    renderStatus.textContent = `Saved HTML load error: ${err.message}`;
+    console.error(err);
+    return false;
+  }
+}
+
+if (!applyEmbeddedSavedSessionIfPresent()) {
+  safeRender();
+}
 </script>
 </body>
 </html>
