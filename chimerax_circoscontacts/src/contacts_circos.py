@@ -1194,12 +1194,30 @@ function positionTooltip(event) {
   tooltip.style.top = `${y}px`;
 }
 
+function unwrapAngleForSpan(angle, start, end) {
+  const twoPi = Math.PI * 2;
+  const candidates = [angle - twoPi, angle, angle + twoPi, angle + twoPi * 2];
+  for (const candidate of candidates) {
+    if (candidate >= start && candidate <= end) return candidate;
+  }
+  const center = (start + end) / 2;
+  let best = candidates[0];
+  let bestDist = Math.abs(candidates[0] - center);
+  for (const candidate of candidates.slice(1)) {
+    const dist = Math.abs(candidate - center);
+    if (dist < bestDist) {
+      best = candidate;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
 function residueAtEvent(chain, chainMeta, event, cx, cy) {
   const { x, y } = svgPoint(event);
   let ang = Math.atan2(y - cy, x - cx);
   if (ang < 0) ang += Math.PI * 2;
-  let adj = ang;
-  if (adj < chain.start) adj += Math.PI * 2;
+  const adj = unwrapAngleForSpan(ang, chain.start, chain.end);
   const rawFrac = clamp((adj - chain.start) / (chain.end - chain.start), 0, 1);
   let idx = clamp(Math.floor(rawFrac * chain.length) + 1, 1, chain.length);
   let frac = rawFrac;
@@ -1486,6 +1504,7 @@ function render() {
   const labelDefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
   const overlayGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   const targetGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  labelsGroup.setAttribute('pointer-events', 'none');
   overlayGroup.setAttribute('pointer-events', 'none');
 
   const plotTitle = (plotTitleInput.value || '').trim();
@@ -1673,17 +1692,24 @@ function render() {
 
     const mid = (chain.start + chain.end) / 2;
     const reverse = Math.sin(mid) > 0;
+    const labelPathOffset = reverse ? 18 : 10;
+    const labelExportOffset = reverse ? 26 : 18;
     const labelPathId = `label-path-${id.replace(/[^A-Za-z0-9_-]/g, '_')}-${Math.round(chain.start * 1000)}`;
     const labelPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     labelPath.setAttribute('id', labelPathId);
-    labelPath.setAttribute('d', arcLinePath(cx, cy, outerR + 10, chain.start, chain.end, reverse));
+    labelPath.setAttribute('d', arcLinePath(cx, cy, outerR + labelPathOffset, chain.start, chain.end, reverse));
     labelDefs.appendChild(labelPath);
     const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    const [labelX, labelY] = polar(cx, cy, outerR + labelExportOffset, mid);
     label.setAttribute('fill', '#0f172a');
     label.setAttribute('font-size', labelSize.value);
     label.setAttribute('font-weight', '600');
     label.setAttribute('text-anchor', 'middle');
     label.setAttribute('dominant-baseline', 'middle');
+    label.setAttribute('data-export-label', 'arc');
+    label.setAttribute('data-export-x', `${labelX}`);
+    label.setAttribute('data-export-y', `${labelY}`);
+    label.setAttribute('data-export-rotation', `${(mid * 180 / Math.PI) + 90 + (reverse ? 180 : 0)}`);
     const textPath = document.createElementNS('http://www.w3.org/2000/svg', 'textPath');
     textPath.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', `#${labelPathId}`);
     textPath.setAttribute('href', `#${labelPathId}`);
@@ -2041,8 +2067,7 @@ function render() {
     for (const sel of sorted) {
       const chain = chainAngles.get(sel.chainId);
       if (!chain) continue;
-      let adj = ang;
-      if (adj < chain.start) adj += Math.PI * 2;
+      const adj = unwrapAngleForSpan(ang, chain.start, chain.end);
       if (adj < chain.start || adj > chain.end) continue;
       const rawFrac = clamp((adj - chain.start) / (chain.end - chain.start), 0, 1);
       let idx = clamp(Math.floor(rawFrac * chain.length) + 1, 1, chain.length);
@@ -2132,15 +2157,15 @@ function render() {
     linksGroup.appendChild(path);
   }
 
+  svg.appendChild(labelDefs);
   svg.appendChild(linksGroup);
   svg.appendChild(arcsGroup);
   svg.appendChild(selectionFillGroup);
   svg.appendChild(selectionStrokeGroup);
-  svg.appendChild(targetGroup);
   svg.appendChild(overlayGroup);
   svg.appendChild(calloutGroup);
-  svg.appendChild(labelDefs);
   svg.appendChild(labelsGroup);
+  svg.appendChild(targetGroup);
   return {
     linkCount: linksGroup.childNodes.length,
     chainCount: order.length
@@ -2424,6 +2449,28 @@ loadSessionFile.addEventListener('change', async () => {
 document.getElementById('downloadSvg').addEventListener('click', () => {
   const ns = 'http://www.w3.org/2000/svg';
   const exportSvg = svg.cloneNode(true);
+  exportSvg.setAttribute('xmlns', ns);
+  exportSvg.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+  exportSvg.querySelectorAll('text[data-export-label="arc"]').forEach((label) => {
+    const textPath = label.querySelector('textPath');
+    if (!textPath) return;
+    const flat = document.createElementNS(ns, 'text');
+    flat.setAttribute('x', label.getAttribute('data-export-x') || '0');
+    flat.setAttribute('y', label.getAttribute('data-export-y') || '0');
+    flat.setAttribute('fill', label.getAttribute('fill') || '#0f172a');
+    flat.setAttribute('font-size', label.getAttribute('font-size') || '12');
+    flat.setAttribute('font-weight', label.getAttribute('font-weight') || '600');
+    flat.setAttribute('font-family', label.getAttribute('font-family') || 'IBM Plex Sans, sans-serif');
+    flat.setAttribute('text-anchor', 'middle');
+    flat.setAttribute('dominant-baseline', 'middle');
+    const x = label.getAttribute('data-export-x') || '0';
+    const y = label.getAttribute('data-export-y') || '0';
+    const rot = label.getAttribute('data-export-rotation') || '0';
+    flat.setAttribute('transform', `rotate(${rot} ${x} ${y})`);
+    flat.textContent = textPath.textContent || '';
+    label.parentNode.insertBefore(flat, label.nextSibling);
+    label.remove();
+  });
   exportSvg.querySelectorAll('foreignObject').forEach((fo) => {
     const x = Number(fo.getAttribute('x') || 0);
     const y = Number(fo.getAttribute('y') || 0);
