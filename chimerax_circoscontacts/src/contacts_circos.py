@@ -1793,11 +1793,11 @@ function render() {
           selObj.callout.html = '';
           selObj.callout.title = calloutRangeTitle(selObj);
         } else if (act === 'comment') {
-          selObj.callout = selObj.callout || { kind: 'comment', text: '', html: '', x: null, y: null, w: 220, h: 80, title: 'Comment' };
+          selObj.callout = selObj.callout || { kind: 'comment', text: '', html: '', x: null, y: null, w: 220, h: 80, title: '' };
           selObj.callout.kind = 'comment';
           selObj.callout.text = selObj.comment || selObj.callout.text || '';
           selObj.callout.html = selObj.callout.html || '';
-          selObj.callout.title = selObj.callout.title || 'Comment';
+          selObj.callout.title = '';
         } else if (act === 'autotrim') {
           const trimmed = trimSelectionToContacts(selObj, thresholdValue, visibleChains);
           if (trimmed) {
@@ -1823,7 +1823,9 @@ function render() {
         } else if (act === 'clearLinkColor') {
           selObj.linkColor = null;
         }
-        closeSelectionMenu();
+        if (act !== 'autotrim' && act !== 'applyEdit') {
+          closeSelectionMenu();
+        }
         safeRender();
         });
       }
@@ -1909,7 +1911,8 @@ function render() {
         : escapeHtml(textVal).replace(/\\n/g, '<br>');
       const titleText = callout.kind === 'sequence'
         ? (callout.title || calloutRangeTitle(sel))
-        : (callout.title || 'Comment');
+        : '';
+      const titleBarH = titleText ? 16 : 4;
       const minH = 40;
       const height = clamp(Math.max(callout.h || minH, minH), minH, 620);
       const boxX = clamp(callout.x, 0, CANVAS_W - width);
@@ -1941,6 +1944,7 @@ function render() {
       rect.setAttribute('fill', 'rgba(255,255,255,0.92)');
       rect.setAttribute('stroke', color);
       rect.setAttribute('stroke-width', '1');
+      rect.setAttribute('data-callout-box', `${sel.id}`);
       calloutGroup.appendChild(rect);
 
       const dragHandle = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
@@ -1949,6 +1953,7 @@ function render() {
       dragHandle.setAttribute('width', `${Math.max(12, width - 4)}`);
       dragHandle.setAttribute('height', '12');
       dragHandle.setAttribute('fill', 'rgba(148,163,184,0.18)');
+      dragHandle.setAttribute('data-export-ignore', 'true');
       dragHandle.style.cursor = 'move';
       dragHandle.addEventListener('pointerdown', (ev) => {
         ev.stopPropagation();
@@ -1957,23 +1962,27 @@ function render() {
       });
       calloutGroup.appendChild(dragHandle);
 
-      const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      title.setAttribute('x', boxX + 6);
-      title.setAttribute('y', boxY + 11);
-      title.setAttribute('fill', '#334155');
-      title.setAttribute('font-size', '11');
-      title.setAttribute('font-weight', '600');
-      title.setAttribute('font-family', 'IBM Plex Sans, sans-serif');
-      title.textContent = titleText;
-      title.setAttribute('pointer-events', 'none');
-      calloutGroup.appendChild(title);
+      if (titleText) {
+        const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        title.setAttribute('x', boxX + 6);
+        title.setAttribute('y', boxY + 11);
+        title.setAttribute('fill', '#334155');
+        title.setAttribute('font-size', '11');
+        title.setAttribute('font-weight', '600');
+        title.setAttribute('font-family', 'IBM Plex Sans, sans-serif');
+        title.textContent = titleText;
+        title.setAttribute('pointer-events', 'none');
+        title.setAttribute('data-callout-title', `${sel.id}`);
+        calloutGroup.appendChild(title);
+      }
 
       const fo = document.createElementNS('http://www.w3.org/2000/svg', 'foreignObject');
       fo.setAttribute('x', boxX + 2);
-      fo.setAttribute('y', boxY + 16);
+      fo.setAttribute('y', boxY + titleBarH);
       fo.setAttribute('width', `${Math.max(4, width - 4)}`);
-      fo.setAttribute('height', `${Math.max(4, height - 18)}`);
+      fo.setAttribute('height', `${Math.max(4, height - titleBarH - 2)}`);
       fo.setAttribute('data-export-text', encodeURIComponent(sel.callout.text || ''));
+      fo.setAttribute('data-callout-fo', `${sel.id}`);
       const div = document.createElement('div');
       div.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
       div.setAttribute(
@@ -1990,7 +1999,7 @@ function render() {
         fo.setAttribute('data-export-text', encodeURIComponent(sel.callout.text || ''));
         if (sel.callout.kind !== 'comment' && sel.callout.text !== selectionSequenceText(sel)) {
           sel.callout.kind = 'comment';
-          sel.callout.title = sel.callout.title || 'Comment';
+          sel.callout.title = '';
           sel.comment = sel.callout.text;
         }
         if (sel.callout.kind === 'comment') {
@@ -2018,6 +2027,7 @@ function render() {
         h.setAttribute('stroke', color);
         h.setAttribute('stroke-width', '1');
         h.setAttribute('stroke-opacity', '0');
+        h.setAttribute('data-export-ignore', 'true');
         h.style.cursor = `${mode}-resize`;
         h.addEventListener('pointerdown', (ev) => {
           ev.stopPropagation();
@@ -2451,6 +2461,7 @@ document.getElementById('downloadSvg').addEventListener('click', () => {
   const exportSvg = svg.cloneNode(true);
   exportSvg.setAttribute('xmlns', ns);
   exportSvg.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+  exportSvg.querySelectorAll('[data-export-ignore="true"]').forEach((node) => node.remove());
   exportSvg.querySelectorAll('text[data-export-label="arc"]').forEach((label) => {
     const textPath = label.querySelector('textPath');
     if (!textPath) return;
@@ -2475,17 +2486,16 @@ document.getElementById('downloadSvg').addEventListener('click', () => {
     const x = Number(fo.getAttribute('x') || 0);
     const y = Number(fo.getAttribute('y') || 0);
     const w = Number(fo.getAttribute('width') || 120);
-    const h = Number(fo.getAttribute('height') || 40);
     const encoded = fo.getAttribute('data-export-text') || '';
     const textVal = decodeURIComponent(encoded);
-    let lines = wrapLines(textVal, Math.max(10, w - 4));
-    const maxLines = Math.max(1, Math.floor((h - 2) / 14));
-    if (lines.length > maxLines) {
-      lines = lines.slice(0, maxLines);
-      const tail = lines[maxLines - 1] || '';
-      lines[maxLines - 1] = tail.length > 3
-        ? `${tail.slice(0, tail.length - 3)}...`
-        : '...';
+    const lines = wrapLines(textVal, Math.max(10, w - 4));
+    const boxId = fo.getAttribute('data-callout-fo');
+    const box = boxId ? exportSvg.querySelector(`rect[data-callout-box="${boxId}"]`) : null;
+    const title = boxId ? exportSvg.querySelector(`text[data-callout-title="${boxId}"]`) : null;
+    const titleBarH = title ? 16 : 4;
+    const neededHeight = Math.max(40, titleBarH + 4 + Math.max(1, lines.length) * 14);
+    if (box) {
+      box.setAttribute('height', `${neededHeight}`);
     }
     const text = document.createElementNS(ns, 'text');
     text.setAttribute('fill', '#0f172a');
