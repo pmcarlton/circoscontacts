@@ -150,7 +150,7 @@ def detect_split_dna(
     }
 
 
-def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter]:
+def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter, Dict[Tuple[str, int, str, int], set[str]]]:
     def extract_chain(token: str) -> str:
         if token.startswith("/"):
             return token[1:]
@@ -160,6 +160,7 @@ def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter]:
 
     counts_atom: Counter = Counter()
     counts_residue: Counter = Counter()
+    contact_models: Dict[Tuple[str, int, str, int], set[str]] = defaultdict(set)
     for path in contact_paths:
         per_file_pairs = set()
         with path.open() as fh:
@@ -167,6 +168,7 @@ def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter]:
                 parts = line.split()
                 chain1 = chain2 = None
                 res1 = res2 = None
+                model_label = None
 
                 # Legacy ChimeraX contacts format:
                 # /E ALA 204 O     /J DT 28 OP1      0.219    2.761
@@ -183,6 +185,10 @@ def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter]:
                 elif len(parts) >= 10 and "/" in parts[1] and "/" in parts[6]:
                     chain1 = extract_chain(parts[1])
                     chain2 = extract_chain(parts[6])
+                    model1 = parts[1].split("/", 1)[0]
+                    model2 = parts[6].split("/", 1)[0]
+                    if model1.startswith("#") and model2.startswith("#"):
+                        model_label = model1 if model1 == model2 else ",".join(sorted({model1, model2}))
                     try:
                         res1 = int(parts[3])
                         res2 = int(parts[8])
@@ -194,9 +200,11 @@ def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter]:
                 key = canonical_contact(chain1, res1, chain2, res2)
                 counts_atom[key] += 1
                 per_file_pairs.add(key)
+                if model_label:
+                    contact_models[key].add(model_label)
         for key in per_file_pairs:
             counts_residue[key] += 1
-    return counts_atom, counts_residue
+    return counts_atom, counts_residue, contact_models
 
 
 def canonical_contact(chain1: str, res1: int, chain2: str, res2: int) -> Tuple[str, int, str, int]:
@@ -411,11 +419,18 @@ def build_chain_maps(
 def aggregate_contacts(
     counts_atom: Counter,
     counts_residue: Counter,
+    contact_models: Dict[Tuple[str, int, str, int], set[str]],
     pos_map: Dict[str, Dict[int, int]],
     display_chain_of: Dict[str, str],
 ) -> Tuple[List[Dict[str, int | str | list]], int, int]:
+    def model_sort_key(label: str) -> Tuple[int, object]:
+        if label.startswith("#") and label[1:].isdigit():
+            return (0, int(label[1:]))
+        return (1, label)
+
     agg_atom: Counter = Counter()
     agg_residue: Counter = Counter()
+    agg_models: Dict[Tuple[str, int, str, int], set[str]] = defaultdict(set)
     sources: Dict[Tuple[str, int, str, int], Dict[str, set]] = defaultdict(
         lambda: {"a": set(), "b": set()}
     )
@@ -439,6 +454,7 @@ def aggregate_contacts(
         else:
             sources[key]["a"].add((chain1, res1))
             sources[key]["b"].add((chain2, res2))
+        agg_models[key].update(contact_models.get((chain1, res1, chain2, res2), set()))
         agg_atom[key] += counts_atom[(chain1, res1, chain2, res2)]
 
     for chain1, res1, chain2, res2 in counts_residue:
@@ -476,6 +492,10 @@ def aggregate_contacts(
                     {"chain": chain, "resnum": resnum}
                     for chain, resnum in sorted(src["b"])
                 ],
+                "models": sorted(
+                    agg_models.get((a, pa, b, pb), set()),
+                    key=model_sort_key,
+                ),
             }
         )
     contacts.sort(key=lambda x: x["count_atom"], reverse=True)
@@ -828,8 +848,8 @@ svg {
       <div class="hint" id="orderHint"></div>
       <label for="labelSize" style="margin-top:8px;">Label font size</label>
       <div class="row">
-        <input id="labelSize" type="range" min="8" max="24" step="1" value="12">
-        <input id="labelSizeInput" type="number" min="8" max="24" step="1" value="12">
+        <input id="labelSize" type="range" min="8" max="24" step="1" value="24">
+        <input id="labelSizeInput" type="number" min="8" max="24" step="1" value="24">
       </div>
     </div>
     <div class="control">
@@ -894,6 +914,7 @@ let nextSelectionId = 1;
 let dragSelection = null;
 let suppressNextClick = false;
 let activeCalloutDrag = null;
+let pendingNameFocusChain = null;
 const dnaSeqSideCache = new Map();
 const CANVAS_W = 1400;
 const CANVAS_H = 900;
@@ -906,6 +927,18 @@ const AA1 = {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function linkCount(link) {
+  return countMode === 'atom' ? link.count_atom : link.count_residue;
+}
+
+function countMeetsThreshold(count, thresholdValue) {
+  return count >= thresholdValue;
+}
+
+function thresholdIntensity(count, thresholdValue, maxCount) {
+  return clamp((count - thresholdValue + 1) / Math.max(1, maxCount - thresholdValue + 1), 0, 1);
 }
 
 function escapeHtml(value) {
@@ -1015,8 +1048,20 @@ function updateOrderHint(order, invalid) {
           target.value = chainDisplayName.get(target.getAttribute('data-chain')) || target.getAttribute('data-chain');
         }
       } else if (event.key === 'Tab') {
+        event.preventDefault();
+        const inputs = Array.from(orderHint.querySelectorAll('input[data-role="name"]:not([disabled])'));
+        const idx = inputs.indexOf(target);
+        const nextInput = inputs.length ? inputs[(idx + 1) % inputs.length] : null;
+        pendingNameFocusChain = nextInput ? nextInput.getAttribute('data-chain') : null;
         if (commitName(target)) {
           safeRender();
+        } else {
+          target.value = chainDisplayName.get(target.getAttribute('data-chain')) || target.getAttribute('data-chain');
+          if (nextInput) {
+            pendingNameFocusChain = null;
+            nextInput.focus();
+            nextInput.select();
+          }
         }
       }
     });
@@ -1027,6 +1072,14 @@ function updateOrderHint(order, invalid) {
       target.value = chainDisplayName.get(chainId) || chainId;
     });
   });
+  if (pendingNameFocusChain) {
+    const target = orderHint.querySelector(`input[data-role="name"][data-chain="${pendingNameFocusChain}"]`);
+    pendingNameFocusChain = null;
+    if (target && !target.disabled) {
+      target.focus();
+      target.select();
+    }
+  }
 }
 
 function polar(cx, cy, r, angle) {
@@ -1272,8 +1325,8 @@ function selectionSequenceText(sel) {
 }
 
 function staticLinkVisible(link, thresholdValue, visibleChains) {
-  const count = countMode === 'atom' ? link.count_atom : link.count_residue;
-  if (count < thresholdValue) return false;
+  const count = linkCount(link);
+  if (!countMeetsThreshold(count, thresholdValue)) return false;
   if (!visibleChains.has(link.a) || !visibleChains.has(link.b)) return false;
   if (contactVisibility.get(link.a) === false || contactVisibility.get(link.b) === false) return false;
   return true;
@@ -1493,10 +1546,8 @@ function render() {
     return link.a === filterChain || link.b === filterChain;
   };
 
-  const countFor = (link) => countMode === 'atom' ? link.count_atom : link.count_residue;
-
   const linkVisible = (link) => {
-    if (countFor(link) < thresholdValue) return false;
+    if (!countMeetsThreshold(linkCount(link), thresholdValue)) return false;
     if (!visibleChains.has(link.a) || !visibleChains.has(link.b)) return false;
     if (contactVisibility.get(link.a) === false || contactVisibility.get(link.b) === false) return false;
     if (!residueFilterMatch(link)) return false;
@@ -2039,8 +2090,8 @@ function render() {
     const [c1x, c1y] = polar(cx, cy, controlR, aAngle);
     const [c2x, c2y] = polar(cx, cy, controlR, bAngle);
 
-    const count = countFor(link);
-    const t = clamp((count - thresholdValue) / Math.max(1, maxCount - thresholdValue), 0, 1);
+    const count = linkCount(link);
+    const t = thresholdIntensity(count, thresholdValue, maxCount);
     const eased = Math.pow(t, 0.65);
     const alpha = minAlpha + (maxAlpha - minAlpha) * eased;
     const width = minStroke + (maxStroke - minStroke) * eased;
@@ -2068,9 +2119,20 @@ function render() {
         }
         return `${info.source_chain}:${info.resname}${info.resnum}`;
       };
+      const formatModels = (models) => {
+        if (!Array.isArray(models) || !models.length) return '';
+        const flat = models.flatMap((item) => String(item).split(',')).filter(Boolean);
+        const allNumeric = flat.every((item) => /^#\\d+$/.test(item));
+        if (allNumeric) {
+          return `#${flat.map((item) => item.slice(1)).join(',')}`;
+        }
+        return flat.join(', ');
+      };
+      const modelText = formatModels(link.models);
       tooltip.innerHTML = `
         <div><strong>${formatInfo(aInfo)}</strong> ↔ <strong>${formatInfo(bInfo)}</strong></div>
         <div>Count (${countMode}): ${count}</div>
+        ${modelText ? `<div>Models: ${modelText}</div>` : ''}
       `;
       tooltip.style.opacity = '1';
       tooltip.classList.remove('clickable');
@@ -2468,8 +2530,8 @@ exportCxc.addEventListener('click', () => {
   lines.push('select clear');
 
   for (const link of DATA.contacts) {
-    const count = countMode === 'atom' ? link.count_atom : link.count_residue;
-    if (count < thresholdValue) continue;
+    const count = linkCount(link);
+    if (!countMeetsThreshold(count, thresholdValue)) continue;
     if (!visible.has(link.a) || !visible.has(link.b)) continue;
     if (contactVisibility.get(link.a) === false || contactVisibility.get(link.b) === false) continue;
     const selectors = new Set();
@@ -2616,16 +2678,16 @@ def main() -> None:
         chain_res, chain_resnums, dna_chains, args.dna_reverse, args.dna_mismatches
     )
 
-    raw_counts_atom, raw_counts_residue = parse_contacts(contact_paths)
+    raw_counts_atom, raw_counts_residue, contact_models = parse_contacts(contact_paths)
     contacts, max_count_atom, max_count_residue = aggregate_contacts(
-        raw_counts_atom, raw_counts_residue, pos_map, display_chain_of
+        raw_counts_atom, raw_counts_residue, contact_models, pos_map, display_chain_of
     )
 
     chain_lengths = {
         chain: len(pos_info.get(chain, [])) for chain in display_chains
     }
     chain_colors = build_colors(display_chains)
-    default_order = display_chains[:]
+    default_order = [chain for chain in display_chains if chain_lengths.get(chain, 0) > 1] or display_chains[:]
 
     output_path = args.output or contacts_dir / "contacts_circos.html"
     generate_html(

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<BundleInfo name="ChimeraX-CircosContacts" version="0.4.5" package="circoscontacts" minSessionVersion="1" maxSessionVersion="1">
+<BundleInfo name="ChimeraX-CircosContacts" version="0.4.7" package="circoscontacts" minSessionVersion="1" maxSessionVersion="1">
   <Author>Peter Carlton</Author>
   <Email>pmcarlton@carltonlab.org</Email>
   <URL>https://circoscontacts.carltonlab.org</URL>
