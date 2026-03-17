@@ -299,14 +299,14 @@ def circoscontacts(
         active_chain_resnums = restrict_chain_resnums
     active_ranges = _active_ranges_from_maps(active_chain_resnums, pos_map, display_chain_of)
 
-    raw_counts_atom, raw_counts_residue = circos.parse_contacts(contact_paths)
+    raw_counts_atom, raw_counts_residue, contact_models = circos.parse_contacts(contact_paths)
     contacts, max_count_atom, max_count_residue = circos.aggregate_contacts(
-        raw_counts_atom, raw_counts_residue, pos_map, display_chain_of
+        raw_counts_atom, raw_counts_residue, contact_models, pos_map, display_chain_of
     )
 
     chain_lengths = {chain: len(pos_info.get(chain, [])) for chain in display_chains}
     chain_colors = circos.build_colors(display_chains)
-    default_order = display_chains[:]
+    default_order = [chain for chain in display_chains if chain_lengths.get(chain, 0) > 1] or display_chains[:]
 
     html_path = run_root / "contacts_circos.html"
     try:
