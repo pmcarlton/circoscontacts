@@ -299,9 +299,9 @@ def circoscontacts(
         active_chain_resnums = restrict_chain_resnums
     active_ranges = _active_ranges_from_maps(active_chain_resnums, pos_map, display_chain_of)
 
-    raw_counts_atom, raw_counts_residue, contact_models = circos.parse_contacts(contact_paths)
+    raw_counts_atom, residue_pairs_by_file, contact_models = circos.parse_contacts(contact_paths)
     contacts, max_count_atom, max_count_residue = circos.aggregate_contacts(
-        raw_counts_atom, raw_counts_residue, contact_models, pos_map, display_chain_of
+        raw_counts_atom, residue_pairs_by_file, contact_models, pos_map, display_chain_of
     )
 
     chain_lengths = {chain: len(pos_info.get(chain, [])) for chain in display_chains}

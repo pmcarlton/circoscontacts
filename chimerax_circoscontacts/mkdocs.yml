@@ -1,0 +1,19 @@
+site_name: ChimeraX CircosContacts
+site_description: User documentation for the ChimeraX CircosContacts plugin
+site_url: https://circoscontacts.carltonlab.org/docs/
+repo_url: https://github.com/pcarlton/circoscontacts
+nav:
+  - Overview: index.md
+  - ChimeraX Command: chimerax-command.md
+  - Web Interface: web-interface.md
+  - Workflows: workflows.md
+#  - Screenshot Capture: screenshot-capture.md
+  - Troubleshooting: troubleshooting.md
+theme:
+  name: mkdocs
+  locale: en
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true

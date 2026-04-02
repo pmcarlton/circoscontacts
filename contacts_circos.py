@@ -150,7 +150,13 @@ def detect_split_dna(
     }
 
 
-def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter, Dict[Tuple[str, int, str, int], set[str]]]:
+def parse_contacts(
+    contact_paths: Iterable[Path],
+) -> Tuple[
+    Counter,
+    List[set[Tuple[str, int, str, int]]],
+    Dict[Tuple[str, int, str, int], set[str]],
+]:
     def extract_chain(token: str) -> str:
         if token.startswith("/"):
             return token[1:]
@@ -159,7 +165,7 @@ def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter, Dic
         return token
 
     counts_atom: Counter = Counter()
-    counts_residue: Counter = Counter()
+    residue_pairs_by_file: List[set[Tuple[str, int, str, int]]] = []
     contact_models: Dict[Tuple[str, int, str, int], set[str]] = defaultdict(set)
     for path in contact_paths:
         per_file_pairs = set()
@@ -202,9 +208,8 @@ def parse_contacts(contact_paths: Iterable[Path]) -> Tuple[Counter, Counter, Dic
                 per_file_pairs.add(key)
                 if model_label:
                     contact_models[key].add(model_label)
-        for key in per_file_pairs:
-            counts_residue[key] += 1
-    return counts_atom, counts_residue, contact_models
+        residue_pairs_by_file.append(per_file_pairs)
+    return counts_atom, residue_pairs_by_file, contact_models
 
 
 def canonical_contact(chain1: str, res1: int, chain2: str, res2: int) -> Tuple[str, int, str, int]:
@@ -418,7 +423,7 @@ def build_chain_maps(
 
 def aggregate_contacts(
     counts_atom: Counter,
-    counts_residue: Counter,
+    residue_pairs_by_file: List[set[Tuple[str, int, str, int]]],
     contact_models: Dict[Tuple[str, int, str, int], set[str]],
     pos_map: Dict[str, Dict[int, int]],
     display_chain_of: Dict[str, str],
@@ -457,17 +462,20 @@ def aggregate_contacts(
         agg_models[key].update(contact_models.get((chain1, res1, chain2, res2), set()))
         agg_atom[key] += counts_atom[(chain1, res1, chain2, res2)]
 
-    for chain1, res1, chain2, res2 in counts_residue:
-        if chain1 not in pos_map or chain2 not in pos_map:
-            continue
-        if res1 not in pos_map[chain1] or res2 not in pos_map[chain2]:
-            continue
-        a_chain = display_chain_of.get(chain1, chain1)
-        b_chain = display_chain_of.get(chain2, chain2)
-        a_pos = pos_map[chain1][res1]
-        b_pos = pos_map[chain2][res2]
-        key = canonical_contact(a_chain, a_pos, b_chain, b_pos)
-        agg_residue[key] += counts_residue[(chain1, res1, chain2, res2)]
+    for per_file_pairs in residue_pairs_by_file:
+        mapped_keys = set()
+        for chain1, res1, chain2, res2 in per_file_pairs:
+            if chain1 not in pos_map or chain2 not in pos_map:
+                continue
+            if res1 not in pos_map[chain1] or res2 not in pos_map[chain2]:
+                continue
+            a_chain = display_chain_of.get(chain1, chain1)
+            b_chain = display_chain_of.get(chain2, chain2)
+            a_pos = pos_map[chain1][res1]
+            b_pos = pos_map[chain2][res2]
+            mapped_keys.add(canonical_contact(a_chain, a_pos, b_chain, b_pos))
+        for key in mapped_keys:
+            agg_residue[key] += 1
     if skipped:
         sys.stderr.write(f"Warning: skipped {skipped} contacts without CIF mapping\n")
 
@@ -846,11 +854,6 @@ svg {
         <button id="resetOrder" class="secondary">Reset</button>
       </div>
       <div class="hint" id="orderHint"></div>
-      <label for="labelSize" style="margin-top:8px;">Label font size</label>
-      <div class="row">
-        <input id="labelSize" type="range" min="8" max="24" step="1" value="24">
-        <input id="labelSizeInput" type="number" min="8" max="24" step="1" value="24">
-      </div>
     </div>
     <div class="control">
       <button id="downloadSvg">Download SVG</button>
@@ -881,8 +884,6 @@ const maxWidth = document.getElementById('maxWidth');
 const maxWidthInput = document.getElementById('maxWidthInput');
 const angle = document.getElementById('angle');
 const angleInput = document.getElementById('angleInput');
-const labelSize = document.getElementById('labelSize');
-const labelSizeInput = document.getElementById('labelSizeInput');
 const orderInput = document.getElementById('order');
 const orderHint = document.getElementById('orderHint');
 const renderStatus = document.getElementById('renderStatus');
@@ -1324,6 +1325,30 @@ function selectionSequenceText(sel) {
   return tokens.join('');
 }
 
+function selectionSequenceHtml(sel, thresholdValue, visibleChains) {
+  const chainMeta = chainMap.get(sel.chainId);
+  if (!chainMeta) return '';
+  const activePositions = new Set();
+  for (const link of DATA.contacts) {
+    if (!staticLinkVisible(link, thresholdValue, visibleChains)) continue;
+    if (link.a === sel.chainId) activePositions.add(link.a_pos);
+    if (link.b === sel.chainId) activePositions.add(link.b_pos);
+  }
+  const dnaSide = dnaPreferredSide(sel.chainId, chainMeta);
+  const [s, e] = normalizeRange(sel.startPos, sel.endPos);
+  const tokens = [];
+  for (let pos = s; pos <= e; pos += 1) {
+    const info = chainMeta.resinfo[pos - 1];
+    if (!info) continue;
+    const token = info.pair
+      ? (dnaSide === 'r' ? baseCode(info.pair.r_resname) : baseCode(info.pair.f_resname))
+      : (AA1[String(info.resname || '').toUpperCase()] || 'X');
+    const safe = escapeHtml(token);
+    tokens.push(activePositions.has(pos) ? `<strong style="color:#0000FF;">${safe}</strong>` : safe);
+  }
+  return tokens.join('');
+}
+
 function staticLinkVisible(link, thresholdValue, visibleChains) {
   const count = linkCount(link);
   if (!countMeetsThreshold(count, thresholdValue)) return false;
@@ -1669,7 +1694,7 @@ function render() {
     const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     const [labelX, labelY] = polar(cx, cy, outerR + labelExportOffset, mid);
     label.setAttribute('fill', '#0f172a');
-    label.setAttribute('font-size', labelSize.value);
+    label.setAttribute('font-size', '24');
     label.setAttribute('font-weight', '600');
     label.setAttribute('text-anchor', 'middle');
     label.setAttribute('dominant-baseline', 'middle');
@@ -1790,7 +1815,7 @@ function render() {
         } else if (act === 'clearLinkColor') {
           selObj.linkColor = null;
         }
-        if (act !== 'autotrim' && act !== 'applyEdit') {
+        if (act !== 'autotrim' && act !== 'applyEdit' && act !== 'callout') {
           closeSelectionMenu();
         }
         safeRender();
@@ -1873,13 +1898,15 @@ function render() {
       const textVal = callout.kind === 'comment'
         ? (callout.text || '')
         : (callout.text || seqDefault);
-      const htmlVal = callout.html && callout.html.length
-        ? callout.html
-        : escapeHtml(textVal).replace(/\\n/g, '<br>');
+      const htmlVal = callout.kind === 'sequence'
+        ? selectionSequenceHtml(sel, thresholdValue, visibleChains)
+        : (callout.html && callout.html.length
+          ? callout.html
+          : escapeHtml(textVal).replace(/\\n/g, '<br>'));
       const titleText = callout.kind === 'sequence'
         ? (callout.title || calloutRangeTitle(sel))
         : '';
-      const titleBarH = titleText ? 16 : 4;
+      const titleBarH = 16;
       const minH = 40;
       const height = clamp(Math.max(callout.h || minH, minH), minH, 620);
       const boxX = clamp(callout.x, 0, CANVAS_W - width);
@@ -1950,6 +1977,7 @@ function render() {
       fo.setAttribute('height', `${Math.max(4, height - titleBarH - 2)}`);
       fo.setAttribute('data-export-text', encodeURIComponent(sel.callout.text || ''));
       fo.setAttribute('data-callout-fo', `${sel.id}`);
+      fo.setAttribute('data-callout-bar-height', `${titleBarH}`);
       const div = document.createElement('div');
       div.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
       div.setAttribute(
@@ -2185,7 +2213,6 @@ function buildSessionState() {
       threshold: Number(threshold.value),
       maxWidth: Number(maxWidth.value),
       angle: Number(angle.value),
-      labelSize: Number(labelSize.value),
       countMode,
       orderText: orderInput.value,
       lockedBottomChain
@@ -2231,8 +2258,6 @@ function applySessionState(state) {
   maxWidthInput.value = maxWidth.value;
   angle.value = clamp(Number(controls.angle ?? angle.value), Number(angle.min), Number(angle.max));
   angleInput.value = angle.value;
-  labelSize.value = clamp(Number(controls.labelSize ?? labelSize.value), Number(labelSize.min), Number(labelSize.max));
-  labelSizeInput.value = labelSize.value;
   if (controls.countMode === 'atom' || controls.countMode === 'residue') {
     countMode = controls.countMode;
   }
@@ -2316,7 +2341,6 @@ syncRange(maxWidth, maxWidthInput);
 syncRange(angle, angleInput, () => {
   if (lockedBottomChain) lockedBottomChain = null;
 });
-syncRange(labelSize, labelSizeInput);
 plotTitleInput.addEventListener('input', () => safeRender());
 
 document.getElementById('applyOrder').addEventListener('click', () => safeRender());
@@ -2470,7 +2494,7 @@ document.getElementById('downloadSvg').addEventListener('click', () => {
     const boxId = fo.getAttribute('data-callout-fo');
     const box = boxId ? exportSvg.querySelector(`rect[data-callout-box="${boxId}"]`) : null;
     const title = boxId ? exportSvg.querySelector(`text[data-callout-title="${boxId}"]`) : null;
-    const titleBarH = title ? 16 : 4;
+    const titleBarH = Number(fo.getAttribute('data-callout-bar-height') || (title ? 16 : 4));
     const neededHeight = Math.max(40, titleBarH + 4 + Math.max(1, lines.length) * 14);
     if (box) {
       box.setAttribute('height', `${neededHeight}`);
@@ -2678,9 +2702,9 @@ def main() -> None:
         chain_res, chain_resnums, dna_chains, args.dna_reverse, args.dna_mismatches
     )
 
-    raw_counts_atom, raw_counts_residue, contact_models = parse_contacts(contact_paths)
+    raw_counts_atom, residue_pairs_by_file, contact_models = parse_contacts(contact_paths)
     contacts, max_count_atom, max_count_residue = aggregate_contacts(
-        raw_counts_atom, raw_counts_residue, contact_models, pos_map, display_chain_of
+        raw_counts_atom, residue_pairs_by_file, contact_models, pos_map, display_chain_of
     )
 
     chain_lengths = {

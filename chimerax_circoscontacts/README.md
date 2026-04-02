@@ -1,4 +1,4 @@
-# ChimeraX CircosContacts Plugin (MVP)
+# ChimeraX CircosContacts Plugin
 
 This bundle adds a command:
 
@@ -15,6 +15,12 @@ This bundle adds a command:
   full chain length with active source residues opaque and other regions dimmed.
 - Outputs an interactive `contacts_circos.html` and opens it.
 - Run output is written to a temp folder unless `output_dir` is provided.
+- The HTML viewer supports:
+  - automatic fit-to-window display,
+  - chain reordering, flipping, and bottom-lock,
+  - editable chain labels,
+  - region selection with sequence/comment callouts,
+  - session save/load, SVG export, and ChimeraX coloring export.
 
 ## Example usage
 

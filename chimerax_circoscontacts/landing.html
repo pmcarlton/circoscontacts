@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ChimeraX CircosContacts</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --ink: #0f172a;
+      --muted: #42526b;
+      --line: #d7e0ea;
+      --accent: #0f5c9a;
+      --accent-soft: #e6f1fa;
+      --good: #115e59;
+      --shadow: 0 14px 40px rgba(15, 23, 42, 0.12);
+      --radius: 14px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% -12%, #dceefe 0%, rgba(220, 238, 254, 0) 48%),
+        radial-gradient(circle at 95% 2%, #ecfdf5 0%, rgba(236, 253, 245, 0) 42%),
+        var(--bg);
+      font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+      line-height: 1.45;
+    }
+
+    .page {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 2.25rem 1.25rem 3rem;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1.15fr 1fr;
+      gap: 1.5rem;
+      align-items: start;
+      margin-bottom: 1.5rem;
+    }
+
+    .hero-copy {
+      background: linear-gradient(160deg, #ffffff 0%, #f9fbff 70%);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 1.35rem 1.35rem 1.1rem;
+    }
+
+    h1 {
+      margin: 0 0 0.55rem;
+      font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
+      font-size: clamp(1.45rem, 3vw, 2.05rem);
+      letter-spacing: 0.01em;
+    }
+
+    .subhead {
+      margin: 0;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+
+    .meta {
+      margin-top: 1rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.55rem;
+    }
+
+    .doc-links {
+      margin-top: 1rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.55rem;
+    }
+
+    .doc-link {
+      display: inline-block;
+      text-decoration: none;
+      color: #0b4473;
+      background: #e2f0fc;
+      border: 1px solid #0cccff;
+      border-radius: 8px;
+      font-size: 0.86rem;
+      padding: 0.35rem 0.62rem;
+    }
+
+    .doc-link:hover {
+      background: #e2f0fc;
+      border: 2px solid #0000ff;
+    }
+
+    .chip {
+      background: var(--accent-soft);
+      border: 1px solid #c5ddf3;
+      border-radius: 999px;
+      color: #154c78;
+      font-size: 0.79rem;
+      letter-spacing: 0.02em;
+      padding: 0.28rem 0.62rem;
+      white-space: nowrap;
+    }
+
+    .hero-figure {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 0.72rem;
+    }
+
+    .hero-figure img {
+      width: 100%;
+      display: block;
+      border-radius: 10px;
+      border: 1px solid #ccd8e5;
+      background: #fff;
+    }
+
+    .hero-figure figcaption {
+      margin-top: 0.6rem;
+      color: #4b5a71;
+      font-size: 0.82rem;
+    }
+
+    .grid {
+      margin-top: 1.1rem;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 1rem 1.05rem;
+    }
+
+    h2 {
+      margin: 0 0 0.55rem;
+      font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
+      font-size: 1.08rem;
+      letter-spacing: 0.02em;
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 1.1rem;
+      color: #22324a;
+      font-size: 0.95rem;
+    }
+
+    li + li { margin-top: 0.34rem; }
+
+    .mono {
+      margin-top: 0.55rem;
+      background: #f7fafd;
+      border: 1px solid #d8e2ed;
+      border-radius: 10px;
+      padding: 0.62rem 0.72rem;
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      font-size: 0.85rem;
+      white-space: pre-wrap;
+      color: #1e2c40;
+    }
+
+    .workflow {
+      margin-top: 1.1rem;
+      background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 1rem 1.05rem;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.65rem;
+      margin-top: 0.65rem;
+    }
+
+    .step {
+      border: 1px solid #d6e1eb;
+      border-radius: 10px;
+      background: #f8fbfe;
+      padding: 0.7rem;
+      min-height: 88px;
+    }
+
+    .step b {
+      display: inline-block;
+      margin-bottom: 0.25rem;
+      color: var(--good);
+      font-size: 0.9rem;
+    }
+
+    .step p {
+      margin: 0;
+      color: #2a3a52;
+      font-size: 0.86rem;
+    }
+
+    .foot {
+      margin-top: 1.2rem;
+      color: #485a72;
+      font-size: 0.84rem;
+      border-top: 1px solid #d7e0ea;
+      padding-top: 0.85rem;
+    }
+
+    .docs-panel {
+      margin-top: 1rem;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 0.95rem 1.05rem;
+    }
+
+    .docs-panel p {
+      margin: 0 0 0.55rem;
+      color: #334155;
+      font-size: 0.92rem;
+    }
+
+    code {
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      background: #eef4fa;
+      border: 1px solid #d6e1eb;
+      border-radius: 6px;
+      padding: 0.08rem 0.3rem;
+      color: #1f3856;
+      font-size: 0.87em;
+    }
+
+    @media (max-width: 980px) {
+      .hero {
+        grid-template-columns: 1fr;
+      }
+      .grid {
+        grid-template-columns: 1fr;
+      }
+      .flow {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 620px) {
+      .flow {
+        grid-template-columns: 1fr;
+      }
+      .page {
+        padding: 1.4rem 0.85rem 2rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <article class="hero-copy">
+        <h1>ChimeraX CircosContacts</h1>
+        <p class="subhead">
+          A ChimeraX plugin that converts predicted contact sets into interactive circos-style maps for
+          analysis and visualization.
+        <div class="doc-links" aria-label="Github">
+          <a class="doc-link" href="https://github.com/pmcarlton/circoscontacts.git">Github</a>
+        </div>
+        <div class="doc-links" aria-label="Documentation links">
+          <a class="doc-link" href="./docs/">Documentation Home</a>
+          <a class="doc-link" href="./docs/chimerax-command/">Command Reference</a>
+          <a class="doc-link" href="./docs/web-interface/">Web UI Guide</a>
+        </div>
+      </article>
+
+      <figure class="hero-figure">
+        <img src="contacts.png" alt="Example circos plot generated by ChimeraX CircosContacts" />
+        <figcaption>
+          Example output from aggregated AlphaFold3 structure predictions.
+        </figcaption>
+      </figure>
+    </section>
+
+    <section class="docs-panel">
+      <h2>Documentation</h2>
+      <p>Detailed user docs are available for command semantics, interactive web controls, workflows, and troubleshooting.</p>
+      <div class="doc-links" aria-label="Documentation navigation">
+        <a class="doc-link" href="./docs/">Overview</a>
+        <a class="doc-link" href="./docs/chimerax-command/">ChimeraX Command</a>
+        <a class="doc-link" href="./docs/web-interface/">Web Interface</a>
+        <a class="doc-link" href="./docs/workflows/">Workflows</a>
+        <a class="doc-link" href="./docs/screenshot-capture/">Screenshot Capture</a>
+        <a class="doc-link" href="./docs/troubleshooting/">Troubleshooting</a>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Core Capabilities</h2>
+        <ul>
+          <li>Runs within ChimeraX via <code>circoscontacts</code> on open or selected models.</li>
+          <li>Supports <code>contacts</code>-style selection and <code>restrict</code> semantics.</li>
+          <li>Aggregates repeated contacts across models with Atom/Residue counting modes.</li>
+          <li>Merges DNA strands (including split/nicked cases) into a single logical arc.</li>
+          <li>Chain reordering, flipping, bottom-locking, threshold filtering, and chain inclusion toggles.</li>
+          <li>Provides session save/load for reproducible annotation workflows.</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h2>Use Cases</h2>
+        <ul>
+          <li>Compare contact persistence across AlphaFold ensembles.</li>
+          <li>Inspect protein-DNA interaction hot spots under residue-range constraints.</li>
+          <li>Prepare figure-ready SVG with curated labels and threshold-aware sequence/comment callouts.</li>
+          <li>Export matching residue colors for ChimeraX surfaces and ribbons.</li>
+        </ul>
+        <div class="mono">circoscontacts #1,2/S,T:100-120 restrict /S,T/C interModel false intramol false</div>
+      </article>
+    </section>
+
+    <section class="workflow">
+      <h2>Typical Workflow</h2>
+      <div class="flow">
+        <div class="step">
+          <b>1. Select</b>
+          <p>Choose open models (or subsets) using standard ChimeraX atom spec syntax.</p>
+        </div>
+        <div class="step">
+          <b>2. Compute</b>
+          <p>Plugin runs ChimeraX <code>contacts</code> with your source/restrict settings.</p>
+        </div>
+        <div class="step">
+          <b>3. Curate</b>
+          <p>Adjust chain order, orientation, thresholds, callouts, and region annotations.</p>
+        </div>
+        <div class="step">
+          <b>4. Export</b>
+          <p>Save SVG, ChimeraX color script (<code>.cxc</code>), and session (<code>.json</code>).</p>
+        </div>
+      </div>
+    </section>
+
+    <p class="foot">
+     Peter Carlton, www.carltonlab.org 
+    </p>
+  </main>
+</body>
+</html>
