@@ -7,8 +7,10 @@ from ChimeraX contact files and corresponding mmCIFs.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import math
+import shlex
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -23,6 +25,7 @@ except Exception:  # pragma: no cover - optional for ChimeraX plugin usage
 
 DNA_RESNAMES = {"DA", "DC", "DG", "DT", "DI", "DU"}
 DNA_BASE_MAP = {"DA": "A", "DC": "C", "DG": "G", "DT": "T", "DI": "I", "DU": "U"}
+TOOL_VERSION = "0.4.20"
 
 
 def find_atom_site_category(doc: "gemmi.cif.Document") -> Dict[str, List[str]] | None:
@@ -156,6 +159,7 @@ def parse_contacts(
     Counter,
     List[set[Tuple[str, int, str, int]]],
     Dict[Tuple[str, int, str, int], set[str]],
+    Dict[Tuple[str, int, str, int], Dict[str, set[Tuple[str, str, int]]]],
 ]:
     def extract_chain(token: str) -> str:
         if token.startswith("/"):
@@ -167,6 +171,9 @@ def parse_contacts(
     counts_atom: Counter = Counter()
     residue_pairs_by_file: List[set[Tuple[str, int, str, int]]] = []
     contact_models: Dict[Tuple[str, int, str, int], set[str]] = defaultdict(set)
+    contact_sources: Dict[Tuple[str, int, str, int], Dict[str, set[Tuple[str, str, int]]]] = defaultdict(
+        lambda: {"a": set(), "b": set()}
+    )
     for path in contact_paths:
         per_file_pairs = set()
         with path.open() as fh:
@@ -174,7 +181,7 @@ def parse_contacts(
                 parts = line.split()
                 chain1 = chain2 = None
                 res1 = res2 = None
-                model_label = None
+                model1 = model2 = ""
 
                 # Legacy ChimeraX contacts format:
                 # /E ALA 204 O     /J DT 28 OP1      0.219    2.761
@@ -191,10 +198,10 @@ def parse_contacts(
                 elif len(parts) >= 10 and "/" in parts[1] and "/" in parts[6]:
                     chain1 = extract_chain(parts[1])
                     chain2 = extract_chain(parts[6])
-                    model1 = parts[1].split("/", 1)[0]
-                    model2 = parts[6].split("/", 1)[0]
-                    if model1.startswith("#") and model2.startswith("#"):
-                        model_label = model1 if model1 == model2 else ",".join(sorted({model1, model2}))
+                    parsed_model1 = parts[1].split("/", 1)[0]
+                    parsed_model2 = parts[6].split("/", 1)[0]
+                    model1 = parsed_model1 if parsed_model1.startswith("#") else ""
+                    model2 = parsed_model2 if parsed_model2.startswith("#") else ""
                     try:
                         res1 = int(parts[3])
                         res2 = int(parts[8])
@@ -206,10 +213,19 @@ def parse_contacts(
                 key = canonical_contact(chain1, res1, chain2, res2)
                 counts_atom[key] += 1
                 per_file_pairs.add(key)
-                if model_label:
-                    contact_models[key].add(model_label)
+                if model1 and model2:
+                    if model1 == model2:
+                        contact_models[key].add(model1)
+                    else:
+                        contact_models[key].update((model1, model2))
+                if key == (chain1, res1, chain2, res2):
+                    contact_sources[key]["a"].add((model1, chain1, res1))
+                    contact_sources[key]["b"].add((model2, chain2, res2))
+                else:
+                    contact_sources[key]["a"].add((model2, chain2, res2))
+                    contact_sources[key]["b"].add((model1, chain1, res1))
         residue_pairs_by_file.append(per_file_pairs)
-    return counts_atom, residue_pairs_by_file, contact_models
+    return counts_atom, residue_pairs_by_file, contact_models, contact_sources
 
 
 def canonical_contact(chain1: str, res1: int, chain2: str, res2: int) -> Tuple[str, int, str, int]:
@@ -447,6 +463,7 @@ def aggregate_contacts(
     counts_atom: Counter,
     residue_pairs_by_file: List[set[Tuple[str, int, str, int]]],
     contact_models: Dict[Tuple[str, int, str, int], set[str]],
+    contact_sources: Dict[Tuple[str, int, str, int], Dict[str, set[Tuple[str, str, int]]]],
     pos_map: Dict[str, Dict[int, int]],
     display_chain_of: Dict[str, str],
 ) -> Tuple[List[Dict[str, int | str | list]], int, int]:
@@ -458,6 +475,9 @@ def aggregate_contacts(
     agg_atom: Counter = Counter()
     agg_residue: Counter = Counter()
     agg_models: Dict[Tuple[str, int, str, int], set[str]] = defaultdict(set)
+    agg_source_entries: Dict[Tuple[str, int, str, int], Dict[str, set[Tuple[str, str, int]]]] = defaultdict(
+        lambda: {"a": set(), "b": set()}
+    )
     sources: Dict[Tuple[str, int, str, int], Dict[str, set]] = defaultdict(
         lambda: {"a": set(), "b": set()}
     )
@@ -482,6 +502,8 @@ def aggregate_contacts(
             sources[key]["a"].add((chain1, res1))
             sources[key]["b"].add((chain2, res2))
         agg_models[key].update(contact_models.get((chain1, res1, chain2, res2), set()))
+        for side in ("a", "b"):
+            agg_source_entries[key][side].update(contact_sources.get((chain1, res1, chain2, res2), {}).get(side, set()))
         agg_atom[key] += counts_atom[(chain1, res1, chain2, res2)]
 
     for per_file_pairs in residue_pairs_by_file:
@@ -506,6 +528,7 @@ def aggregate_contacts(
     contacts = []
     for (a, pa, b, pb), c in agg_atom.items():
         src = sources.get((a, pa, b, pb), {"a": set(), "b": set()})
+        source_entries = agg_source_entries.get((a, pa, b, pb), {"a": set(), "b": set()})
         contacts.append(
             {
                 "a": a,
@@ -521,6 +544,14 @@ def aggregate_contacts(
                 "sources_b": [
                     {"chain": chain, "resnum": resnum}
                     for chain, resnum in sorted(src["b"])
+                ],
+                "source_entries_a": [
+                    {"model": model, "chain": chain, "resnum": resnum}
+                    for model, chain, resnum in sorted(source_entries["a"], key=lambda item: model_sort_key(item[0]) + (item[1], item[2]))
+                ],
+                "source_entries_b": [
+                    {"model": model, "chain": chain, "resnum": resnum}
+                    for model, chain, resnum in sorted(source_entries["b"], key=lambda item: model_sort_key(item[0]) + (item[1], item[2]))
                 ],
                 "models": sorted(
                     agg_models.get((a, pa, b, pb), set()),
@@ -558,6 +589,45 @@ def build_colors(chains: List[str]) -> Dict[str, str]:
     return colors
 
 
+def map_residue_colors_to_display(
+    pos_info: Dict[str, List[Dict[str, str | int]]],
+    residue_colors: Dict[str, Dict[int, str]],
+) -> Dict[str, List[str | None]]:
+    display_colors: Dict[str, List[str | None]] = {}
+    for chain_id, infos in pos_info.items():
+        colors: List[str | None] = []
+        for info in infos:
+            color = None
+            pair = info.get("pair") if isinstance(info, dict) else None
+            if pair:
+                f_chain = str(pair.get("f_chain", ""))
+                f_resnum = int(pair.get("f_resnum", 0))
+                r_chain = str(pair.get("r_chain", ""))
+                r_resnum = int(pair.get("r_resnum", 0))
+                color = residue_colors.get(f_chain, {}).get(f_resnum)
+                if color is None:
+                    color = residue_colors.get(r_chain, {}).get(r_resnum)
+            else:
+                source_chain = str(info.get("source_chain", ""))
+                resnum = int(info.get("resnum", 0))
+                color = residue_colors.get(source_chain, {}).get(resnum)
+            colors.append(color)
+        display_colors[chain_id] = colors
+    return display_colors
+
+
+def build_html_metadata(
+    invocation: str,
+    models: List[Dict[str, str]],
+) -> Dict[str, object]:
+    return {
+        "tool_version": TOOL_VERSION,
+        "created_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "invocation": invocation,
+        "models": models,
+    }
+
+
 def generate_html(
     title: str,
     chains: List[str],
@@ -570,6 +640,9 @@ def generate_html(
     default_order: List[str],
     start_pos_map: Dict[str, int],
     active_ranges: Dict[str, List[Tuple[int, int]]],
+    model_ids: List[str],
+    display_residue_colors: Dict[str, List[str | None]],
+    metadata: Dict[str, object],
     output_path: Path,
 ) -> None:
     data = {
@@ -582,6 +655,7 @@ def generate_html(
                 "resinfo": pos_info.get(chain, []),
                 "start_pos": start_pos_map.get(chain, 1),
                 "active_ranges": active_ranges.get(chain, []),
+                "chimerax_colors": display_residue_colors.get(chain, []),
             }
             for chain in chains
         ],
@@ -589,6 +663,12 @@ def generate_html(
         "max_count_atom": max_count_atom,
         "max_count_residue": max_count_residue,
         "default_order": default_order,
+        "model_ids": model_ids,
+        "has_chimerax_colors": any(
+            any(color for color in display_residue_colors.get(chain, []))
+            for chain in chains
+        ),
+        "info": metadata,
     }
     data_json = json.dumps(data, separators=(",", ":"))
 
@@ -637,11 +717,6 @@ h1 {
   font-weight: 600;
   font-size: 22px;
 }
-.subtitle {
-  color: #475569;
-  font-size: 14px;
-  margin-bottom: 16px;
-}
 .control {
   margin-bottom: 14px;
 }
@@ -661,13 +736,14 @@ input[type="range"] {
 }
 input[type="number"], input[type="text"] {
   width: 100%;
+  box-sizing: border-box;
   padding: 8px 10px;
   border-radius: 8px;
   border: 1px solid #cbd5f5;
   font-size: 13px;
 }
 button {
-  background: #0f172a;
+  background: #1d4ed8;
   color: #fff;
   border: none;
   border-radius: 8px;
@@ -676,7 +752,13 @@ button {
   font-size: 13px;
 }
 button.secondary {
-  background: #64748b;
+  background: #3b82f6;
+}
+button:hover {
+  background: #1e40af;
+}
+button.secondary:hover {
+  background: #2563eb;
 }
 .hint {
   font-size: 12px;
@@ -734,6 +816,22 @@ button.secondary {
 .hint input[type="checkbox"] {
   transform: translateY(1px);
 }
+.mode-row {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+.mode-options,
+.display-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.display-header {
+  font-size: 12px;
+  color: #334155;
+  font-weight: 600;
+  line-height: 1.2;
+}
 .plot-wrap {
   display: flex;
   align-items: center;
@@ -780,6 +878,13 @@ svg {
   margin: 0 0 6px 0;
   font-weight: 600;
 }
+.selection-menu .menu-group-label {
+  font-size: 11px;
+  color: #64748b;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  margin-top: 8px;
+}
 .selection-menu .menu-block {
   border-top: 1px solid #e2e8f0;
   padding-top: 6px;
@@ -790,6 +895,13 @@ svg {
   gap: 6px;
   align-items: center;
   margin-top: 4px;
+}
+.selection-menu .menu-row.wrap {
+  flex-wrap: wrap;
+}
+.selection-menu .menu-button {
+  flex: 1 1 0;
+  min-width: 0;
 }
 .selection-menu button {
   font-size: 12px;
@@ -815,6 +927,122 @@ svg {
   border-radius: 8px;
   margin-top: 8px;
 }
+.version-footer {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #64748b;
+}
+.button-stack {
+  display: grid;
+  gap: 10px;
+}
+.button-group-title {
+  font-size: 11px;
+  color: #64748b;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.button-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.button-grid button,
+.button-stack > button {
+  width: 100%;
+}
+.info-panel {
+  position: absolute;
+  right: 18px;
+  top: 18px;
+  width: min(560px, calc(100% - 36px));
+  max-height: calc(100% - 36px);
+  overflow: auto;
+  display: none;
+  z-index: 11;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
+  padding: 14px;
+}
+.info-panel.visible {
+  display: block;
+}
+.info-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.info-panel-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+.info-panel-section {
+  margin-top: 10px;
+}
+.info-panel-label {
+  font-size: 11px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 4px;
+}
+.info-panel pre,
+.info-panel .info-box {
+  margin: 0;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: #0f172a;
+}
+.info-model {
+  margin-top: 8px;
+}
+.info-model:first-child {
+  margin-top: 0;
+}
+.copy-toast {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 8;
+  max-width: min(360px, calc(100% - 24px));
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-size: 12px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.14);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+.copy-toast.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.copy-toast.error {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+}
+.copy-toast pre {
+  margin: 6px 0 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+}
 @media (max-width: 960px) {
   .page {
     grid-template-columns: 1fr;
@@ -837,7 +1065,6 @@ svg {
 <div class="page">
   <div class="panel controls">
     <h1>__TITLE__</h1>
-    <div class="subtitle">Interactive circos view of aggregated ChimeraX contacts.</div>
     <div class="control">
       <label for="plotTitle">Plot title</label>
       <input id="plotTitle" type="text" value="__TITLE__">
@@ -845,15 +1072,22 @@ svg {
     <div class="control">
       <label for="threshold">Minimum contact visibility threshold</label>
       <div class="row">
-        <input id="threshold" type="range" min="0" max="__MAX_COUNT__" step="1" value="2">
-        <input id="thresholdInput" type="number" min="0" max="__MAX_COUNT__" step="1" value="2">
+        <input id="threshold" type="range" min="1" max="__MAX_COUNT__" step="1" value="2">
+        <input id="thresholdInput" type="number" min="1" max="__MAX_COUNT__" step="1" value="2">
       </div>
     </div>
     <div class="control">
       <label>Contact mode</label>
-      <div class="row">
-        <label class="chain-toggle"><input type="radio" name="countMode" value="atom" checked>Atom</label>
-        <label class="chain-toggle"><input type="radio" name="countMode" value="residue">Residue</label>
+      <div class="row mode-row">
+        <div class="mode-options">
+          <label class="chain-toggle"><input type="radio" name="countMode" value="atom" checked>Atom</label>
+          <label class="chain-toggle"><input type="radio" name="countMode" value="residue">Residue</label>
+        </div>
+        <div class="display-options">
+          <div class="display-header">Display</div>
+          <label class="chain-toggle"><input id="useTransparency" type="checkbox" checked>Transparency</label>
+          <label class="chain-toggle"><input id="useDefaultColors" type="checkbox" checked>Default colors</label>
+        </div>
       </div>
     </div>
     <div class="control">
@@ -880,21 +1114,35 @@ svg {
       <div class="hint" id="orderHint"></div>
     </div>
     <div class="control">
-      <button id="downloadSvg">Download SVG</button>
-      <button id="saveHtml" class="secondary" style="margin-left:8px;">Save HTML</button>
-      <button id="exportCxc" class="secondary" style="margin-left:8px;">ChimeraX Colors</button>
-      <div class="row" style="margin-top:8px;">
-        <button id="saveSession" class="secondary">Save Session</button>
-        <button id="loadSession" class="secondary">Load Session</button>
+      <div class="button-stack">
+        <div>
+          <div class="button-group-title">Export</div>
+          <div class="button-grid" style="margin-top:6px;">
+            <button id="downloadSvg">Download SVG</button>
+            <button id="saveHtml" class="secondary">Save HTML</button>
+          </div>
+          <button id="exportCxc" class="secondary" style="margin-top:8px;">ChimeraX Colors</button>
+        </div>
+        <div>
+          <div class="button-group-title">Session</div>
+          <div class="button-grid" style="margin-top:6px;">
+            <button id="saveSession" class="secondary">Save Session</button>
+            <button id="loadSession" class="secondary">Load Session</button>
+          </div>
+        </div>
+        <button id="infoButton" class="secondary">Info</button>
         <input id="loadSessionFile" type="file" accept=".json,application/json" style="display:none;">
       </div>
       <div class="status" id="renderStatus">Render status: pending</div>
+      <div class="version-footer">CircosContacts v__VERSION__</div>
     </div>
   </div>
   <div class="plot-wrap panel" id="plotWrap" style="position:relative;">
     <svg id="circos" viewBox="0 0 1400 900" role="img" aria-label="Circos plot"></svg>
+    <div class="copy-toast" id="copyToast"></div>
     <div class="tooltip" id="tooltip"></div>
     <div class="selection-menu" id="selectionMenu"></div>
+    <div class="info-panel" id="infoPanel"></div>
   </div>
 </div>
 <script>
@@ -911,6 +1159,7 @@ const angleInput = document.getElementById('angleInput');
 const orderInput = document.getElementById('order');
 const orderHint = document.getElementById('orderHint');
 const renderStatus = document.getElementById('renderStatus');
+const copyToast = document.getElementById('copyToast');
 const plotWrap = document.getElementById('plotWrap');
 const saveHtml = document.getElementById('saveHtml');
 const exportCxc = document.getElementById('exportCxc');
@@ -918,7 +1167,11 @@ const selectionMenu = document.getElementById('selectionMenu');
 const saveSessionBtn = document.getElementById('saveSession');
 const loadSessionBtn = document.getElementById('loadSession');
 const loadSessionFile = document.getElementById('loadSessionFile');
+const infoButton = document.getElementById('infoButton');
+const infoPanel = document.getElementById('infoPanel');
 const plotTitleInput = document.getElementById('plotTitle');
+const useTransparencyInput = document.getElementById('useTransparency');
+const useDefaultColorsInput = document.getElementById('useDefaultColors');
 
 const chainMap = new Map(DATA.chains.map(c => [c.id, c]));
 const defaultOrder = DATA.default_order.slice();
@@ -928,6 +1181,8 @@ const chainFlip = new Map(DATA.chains.map(c => [c.id, false]));
 const chainDisplayName = new Map(DATA.chains.map(c => [c.id, c.id]));
 let lockedBottomChain = null;
 let countMode = 'atom';
+let useTransparency = true;
+let useDefaultColors = true;
 
 let filterChain = null;
 let hoverArcPath = null;
@@ -949,6 +1204,9 @@ const AA1 = {
   HIS: 'H', ILE: 'I', LEU: 'L', LYS: 'K', MET: 'M', PHE: 'F', PRO: 'P', SER: 'S',
   THR: 'T', TRP: 'W', TYR: 'Y', VAL: 'V', SEC: 'U', PYL: 'O'
 };
+const hasChimeraXColors = DATA.has_chimerax_colors === true;
+useDefaultColorsInput.disabled = !hasChimeraXColors;
+useDefaultColorsInput.checked = true;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -967,11 +1225,197 @@ function thresholdIntensity(count, thresholdValue, maxCount) {
 }
 
 function escapeHtml(value) {
-  return value
+  return String(value)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\"/g, '&quot;');
+}
+
+function showCopyToast(message, command, isError = false) {
+  if (!copyToast) return;
+  const safeMessage = escapeHtml(message || 'Copied ChimeraX command');
+  const safeCommand = escapeHtml(command || '');
+  copyToast.innerHTML = `<div>${safeMessage}</div>${safeCommand ? `<pre style="margin:6px 0 0;white-space:pre-wrap;font:11px IBM Plex Mono, monospace;">${safeCommand}</pre>` : ''}`;
+  copyToast.style.borderColor = isError ? '#dc2626' : '#1d4ed8';
+  copyToast.classList.add('visible');
+  window.clearTimeout(showCopyToast._timer);
+  showCopyToast._timer = window.setTimeout(() => {
+    copyToast.classList.remove('visible');
+  }, 3200);
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text || '');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch (err) {
+      // fall through
+    }
+  }
+  const ta = document.createElement('textarea');
+  ta.value = value;
+  ta.setAttribute('readonly', 'readonly');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch (err) {
+    ok = false;
+  }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+function compareModelId(a, b) {
+  const sa = String(a || '');
+  const sb = String(b || '');
+  const ma = /^#(\\d+)$/.exec(sa);
+  const mb = /^#(\\d+)$/.exec(sb);
+  if (ma && mb) return Number(ma[1]) - Number(mb[1]);
+  if (ma) return -1;
+  if (mb) return 1;
+  return sa.localeCompare(sb);
+}
+
+function compressNumbers(values) {
+  const nums = Array.from(new Set(values.map((value) => Number(value)).filter(Number.isFinite))).sort((a, b) => a - b);
+  const out = [];
+  for (let i = 0; i < nums.length; i += 1) {
+    const start = nums[i];
+    let end = start;
+    while (i + 1 < nums.length && nums[i + 1] === end + 1) {
+      i += 1;
+      end = nums[i];
+    }
+    out.push(start === end ? `${start}` : `${start}-${end}`);
+  }
+  return out.join(',');
+}
+
+function buildSelectSpec(records) {
+  const normalized = [];
+  const seen = new Set();
+  for (const rec of records || []) {
+    if (!rec || !rec.chain || !Number.isFinite(Number(rec.resnum))) continue;
+    const model = String(rec.model || '');
+    const chain = String(rec.chain);
+    const resnum = Number(rec.resnum);
+    const key = `${model}|${chain}|${resnum}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ model, chain, resnum });
+  }
+  if (!normalized.length) return '';
+
+  const groups = new Map();
+  for (const rec of normalized) {
+    const groupKey = rec.model || '__nomodel__';
+    if (!groups.has(groupKey)) groups.set(groupKey, new Map());
+    const chainMapForModel = groups.get(groupKey);
+    if (!chainMapForModel.has(rec.chain)) chainMapForModel.set(rec.chain, []);
+    chainMapForModel.get(rec.chain).push(rec.resnum);
+  }
+
+  const modelKeys = Array.from(groups.keys()).sort((a, b) => compareModelId(a === '__nomodel__' ? '' : a, b === '__nomodel__' ? '' : b));
+  const signatureBuckets = new Map();
+  for (const modelKey of modelKeys) {
+    const chainEntries = Array.from(groups.get(modelKey).entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([chain, nums]) => `${chain}:${compressNumbers(nums)}`);
+    const signature = chainEntries.join('/');
+    if (!signatureBuckets.has(signature)) signatureBuckets.set(signature, []);
+    signatureBuckets.get(signature).push(modelKey === '__nomodel__' ? '' : modelKey);
+  }
+
+  const parts = [];
+  for (const [signature, models] of signatureBuckets.entries()) {
+    const chainSpec = '/' + signature;
+    const compactModels = models.filter(Boolean);
+    if (compactModels.length) {
+      const modelSpec = '#' + compactModels.map((m) => m.replace(/^#/, '')).sort((a, b) => Number(a) - Number(b)).join(',');
+      parts.push(`${modelSpec}${chainSpec}`);
+    } else {
+      parts.push(chainSpec);
+    }
+  }
+  if (!parts.length) return '';
+  if (parts.length === 1) return `select ${parts[0]}`;
+  return ['select clear', ...parts.map((part) => `select add ${part}`)].join('\\n');
+}
+
+function mergedModelRecords(sourceEntries, fallbackSources, models) {
+  const records = [];
+  if (Array.isArray(sourceEntries) && sourceEntries.length) {
+    for (const rec of sourceEntries) {
+      records.push({ model: rec.model || '', chain: rec.chain, resnum: Number(rec.resnum) });
+    }
+    return records;
+  }
+  const modelList = Array.isArray(models) && models.length ? models : [''];
+  for (const src of fallbackSources || []) {
+    for (const model of modelList) {
+      records.push({ model, chain: src.chain, resnum: Number(src.resnum) });
+    }
+  }
+  return records;
+}
+
+function linkSelectionRecords(link) {
+  const records = [];
+  records.push(...mergedModelRecords(link.source_entries_a, link.sources_a, link.models));
+  records.push(...mergedModelRecords(link.source_entries_b, link.sources_b, link.models));
+  return records;
+}
+
+function regionSelectionRecords(sel) {
+  const chainMeta = chainMap.get(sel.chainId);
+  if (!chainMeta) return [];
+  const [startPos, endPos] = normalizeRange(sel.startPos, sel.endPos);
+  const models = Array.isArray(DATA.model_ids) && DATA.model_ids.length ? DATA.model_ids : [''];
+  const records = [];
+  for (let pos = startPos; pos <= endPos; pos += 1) {
+    const info = chainMeta.resinfo[pos - 1];
+    if (!info) continue;
+    if (info.pair) {
+      for (const model of models) {
+        records.push({ model, chain: info.pair.f_chain, resnum: Number(info.pair.f_resnum) });
+        records.push({ model, chain: info.pair.r_chain, resnum: Number(info.pair.r_resnum) });
+      }
+    } else {
+      for (const model of models) {
+        records.push({ model, chain: info.source_chain, resnum: Number(info.resnum) });
+      }
+    }
+  }
+  return records;
+}
+
+function regionContactSelectionRecords(sel, thresholdValue, visibleChains) {
+  const records = [];
+  for (const link of DATA.contacts) {
+    if (!staticLinkVisible(link, thresholdValue, visibleChains)) continue;
+    if (!linkMatchesSelection(link, sel)) continue;
+    records.push(...linkSelectionRecords(link));
+  }
+  return records;
+}
+
+async function copyChimeraXSelectCommand(records, message) {
+  const command = buildSelectSpec(records);
+  if (!command) {
+    showCopyToast('No ChimeraX selection could be generated', '', true);
+    return;
+  }
+  const ok = await copyTextToClipboard(command);
+  if (ok) showCopyToast(message || 'Copied ChimeraX select command', command, false);
+  else showCopyToast('Copy failed — command shown below', command, true);
 }
 
 function parseOrder(raw) {
@@ -1403,6 +1847,60 @@ function closeSelectionMenu() {
   selectionMenu.innerHTML = '';
 }
 
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/'/g, '&#39;');
+}
+
+function closeInfoPanel() {
+  infoPanel.classList.remove('visible');
+  infoPanel.innerHTML = '';
+}
+
+function openInfoPanel() {
+  const info = DATA.info || {};
+  const models = Array.isArray(info.models) ? info.models : [];
+  const modelBlocks = models.length
+    ? models.map((model, idx) => {
+        const parts = [];
+        if (model.name) parts.push(`<div><strong>Name:</strong> ${escapeHtml(model.name)}</div>`);
+        if (model.filename) parts.push(`<div><strong>File:</strong> ${escapeHtml(model.filename)}</div>`);
+        if (model.path) parts.push(`<div><strong>Path:</strong> ${escapeHtml(model.path)}</div>`);
+        if (model.atomspec) parts.push(`<div><strong>Spec:</strong> ${escapeHtml(model.atomspec)}</div>`);
+        return `<div class="info-box info-model">${parts.join('')}</div>`;
+      }).join('')
+    : '<div class="info-box">No model metadata stored.</div>';
+  infoPanel.innerHTML = `
+    <div class="info-panel-header">
+      <div class="info-panel-title">Plot Information</div>
+      <button id="closeInfoPanel" class="secondary">Close</button>
+    </div>
+    <div class="info-panel-section">
+      <div class="info-panel-label">Version</div>
+      <div class="info-box">${escapeHtml(info.tool_version || '')}</div>
+    </div>
+    <div class="info-panel-section">
+      <div class="info-panel-label">Created</div>
+      <div class="info-box">${escapeHtml(info.created_at || '')}</div>
+    </div>
+    <div class="info-panel-section">
+      <div class="info-panel-label">Invocation</div>
+      <pre>${escapeHtml(info.invocation || '')}</pre>
+    </div>
+    <div class="info-panel-section">
+      <div class="info-panel-label">Models</div>
+      ${modelBlocks}
+    </div>
+  `;
+  infoPanel.classList.add('visible');
+  const closeBtn = document.getElementById('closeInfoPanel');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeInfoPanel();
+    });
+  }
+}
+
 function wrapLines(text, maxWidthPx) {
   const charPx = 7.2;
   const maxChars = Math.max(1, Math.floor(maxWidthPx / charPx));
@@ -1439,6 +1937,81 @@ function wrapLines(text, maxWidthPx) {
     if (line.length || !words.length) out.push(line);
   }
   return out.length ? out : [''];
+}
+
+function parseInlineStyle(styleText) {
+  const style = {};
+  for (const chunk of String(styleText || '').split(';')) {
+    const idx = chunk.indexOf(':');
+    if (idx === -1) continue;
+    const key = chunk.slice(0, idx).trim().toLowerCase();
+    const value = chunk.slice(idx + 1).trim();
+    if (key) style[key] = value;
+  }
+  return style;
+}
+
+function extractStyledTextSegments(root, inherited = null) {
+  const base = inherited || { fill: '#0f172a', weight: '400', fontStyle: 'normal' };
+  const out = [];
+  const walk = (node, current) => {
+    if (!node) return;
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (node.nodeValue) {
+        out.push({ text: node.nodeValue, fill: current.fill, weight: current.weight, fontStyle: current.fontStyle });
+      }
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const tag = node.tagName.toLowerCase();
+    if (tag === 'br') {
+      out.push({ text: '\\n', fill: current.fill, weight: current.weight, fontStyle: current.fontStyle });
+      return;
+    }
+    const next = { ...current };
+    if (tag === 'strong' || tag === 'b') next.weight = '700';
+    if (tag === 'em' || tag === 'i') next.fontStyle = 'italic';
+    const inline = parseInlineStyle(node.getAttribute('style'));
+    if (inline.color) next.fill = inline.color;
+    if (inline['font-weight']) next.weight = inline['font-weight'];
+    if (inline['font-style']) next.fontStyle = inline['font-style'];
+    Array.from(node.childNodes).forEach((child) => walk(child, next));
+  };
+  walk(root, base);
+  return out;
+}
+
+function wrapStyledSegments(segments, maxWidthPx) {
+  const charPx = 7.2;
+  const maxChars = Math.max(1, Math.floor(maxWidthPx / charPx));
+  const lines = [[]];
+  let lineLen = 0;
+  const pushChar = (style, ch) => {
+    const line = lines[lines.length - 1];
+    const prev = line[line.length - 1];
+    if (prev && prev.fill === style.fill && prev.weight === style.weight && prev.fontStyle === style.fontStyle) {
+      prev.text += ch;
+    } else {
+      line.push({ text: ch, fill: style.fill, weight: style.weight, fontStyle: style.fontStyle });
+    }
+    lineLen += 1;
+  };
+  for (const seg of segments) {
+    const style = { fill: seg.fill || '#0f172a', weight: seg.weight || '400', fontStyle: seg.fontStyle || 'normal' };
+    for (const ch of String(seg.text || '')) {
+      if (ch === '\\n') {
+        lines.push([]);
+        lineLen = 0;
+        continue;
+      }
+      if (lineLen >= maxChars) {
+        lines.push([]);
+        lineLen = 0;
+      }
+      pushChar(style, ch);
+    }
+  }
+  return lines;
 }
 
 function nearestPointOnRect(x, y, rx, ry, rw, rh) {
@@ -1510,10 +2083,8 @@ function render() {
   const maxCount = countMode === 'atom' ? DATA.max_count_atom : DATA.max_count_residue;
   threshold.max = maxCount;
   thresholdInput.max = maxCount;
-  if (Number(threshold.value) > maxCount) {
-    threshold.value = maxCount;
-    thresholdInput.value = maxCount;
-  }
+  threshold.value = clamp(Number(threshold.value), 1, maxCount);
+  thresholdInput.value = threshold.value;
   const gapDeg = 2;
   const gap = gapDeg * Math.PI / 180;
   const thresholdValue = Number(threshold.value);
@@ -1648,6 +2219,46 @@ function render() {
     return displayRangesForChain(chain, meta).length > 0;
   });
 
+  const chainPathData = (chain, chainMeta) => {
+    if (chain.length >= 10) {
+      const indicatorResidues = Math.max(2, Math.min(6, Math.round(chain.length * 0.03)));
+      const segmentAngle = (indicatorResidues / chain.length) * (chain.end - chain.start);
+      const startAtStart = ((chainMeta.start_pos || 1) === 1) !== (chain.flip === true);
+      const flare = 6;
+      return styledArcPath(cx, cy, outerR, innerR, chain.start, chain.end, startAtStart, flare, segmentAngle);
+    }
+    return arcPath(cx, cy, outerR, innerR, chain.start, chain.end);
+  };
+
+  const appendColoredChainSegments = (chainId, chain, chainMeta, opacityValue, ranges = null) => {
+    const clipId = `chain-clip-${chainId.replace(/[^A-Za-z0-9_-]/g, '_')}-${Math.round(chain.start * 1000)}-${String(opacityValue).replace(/[^A-Za-z0-9_-]/g, '_')}`;
+    const clipPath = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
+    clipPath.setAttribute('id', clipId);
+    const clipShape = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    clipShape.setAttribute('d', chainPathData(chain, chainMeta));
+    clipPath.appendChild(clipShape);
+    labelDefs.appendChild(clipPath);
+
+    const segmentGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    segmentGroup.setAttribute('clip-path', `url(#${clipId})`);
+    segmentGroup.setAttribute('opacity', String(opacityValue));
+    const allowed = ranges ? new Set(ranges.flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, idx) => a + idx))) : null;
+    const span = chain.end - chain.start;
+    const colors = Array.isArray(chainMeta.chimerax_colors) ? chainMeta.chimerax_colors : [];
+    for (let displayIdx = 1; displayIdx <= chain.length; displayIdx += 1) {
+      if (allowed && !allowed.has(displayIdx)) continue;
+      const sourceIdx = chain.flip ? (chain.length - displayIdx + 1) : displayIdx;
+      const color = colors[sourceIdx - 1] || chain.color;
+      const segStart = chain.start + ((displayIdx - 1) / chain.length) * span;
+      const segEnd = chain.start + (displayIdx / chain.length) * span;
+      const segPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      segPath.setAttribute('d', arcPath(cx, cy, outerR, innerR, segStart, segEnd));
+      segPath.setAttribute('fill', color);
+      segmentGroup.appendChild(segPath);
+    }
+    arcsGroup.appendChild(segmentGroup);
+  };
+
   for (const id of order) {
     const chain = chainAngles.get(id);
     const chainMeta = chainMap.get(id);
@@ -1658,23 +2269,25 @@ function render() {
       activeRanges.length === 1 &&
       activeRanges[0][0] === 1 &&
       activeRanges[0][1] === chain.length;
+    const hasChimeraXChainColors =
+      !useDefaultColors &&
+      Array.isArray(chainMeta.chimerax_colors) &&
+      chainMeta.chimerax_colors.some((color) => color);
 
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    if (chain.length >= 10) {
-      const indicatorResidues = Math.max(2, Math.min(6, Math.round(chain.length * 0.03)));
-      const segmentAngle = (indicatorResidues / chain.length) * (chain.end - chain.start);
-      const startAtStart = ((chainMeta.start_pos || 1) === 1) !== (chain.flip === true);
-      const flare = 6;
-      path.setAttribute(
-        'd',
-        styledArcPath(cx, cy, outerR, innerR, chain.start, chain.end, startAtStart, flare, segmentAngle)
-      );
-    } else {
-      path.setAttribute('d', arcPath(cx, cy, outerR, innerR, chain.start, chain.end));
-    }
-    path.setAttribute('fill', chain.color);
     const baseOpacity = (hasActiveMask && !fullyActive) || (anyActiveMask && !hasActiveMask) ? '0.45' : '0.9';
-    path.setAttribute('opacity', baseOpacity);
+    path.setAttribute('d', chainPathData(chain, chainMeta));
+    if (hasChimeraXChainColors) {
+      appendColoredChainSegments(id, chain, chainMeta, baseOpacity);
+      if (hasActiveMask && !fullyActive) {
+        appendColoredChainSegments(id, chain, chainMeta, 0.9, activeRanges);
+      }
+      path.setAttribute('fill', '#ffffff');
+      path.setAttribute('opacity', '0.001');
+    } else {
+      path.setAttribute('fill', chain.color);
+      path.setAttribute('opacity', baseOpacity);
+    }
     path.style.cursor = 'pointer';
     path.addEventListener('pointerdown', (event) => {
       closeSelectionMenu();
@@ -1751,7 +2364,7 @@ function render() {
       tooltip.style.opacity = '0';
     });
     arcsGroup.appendChild(path);
-    if (hasActiveMask && !fullyActive) {
+    if (hasActiveMask && !fullyActive && !hasChimeraXChainColors) {
       const span = chain.end - chain.start;
       for (const [startRes, endRes] of activeRanges) {
         const segStart = chain.start + ((startRes - 1) / chain.length) * span;
@@ -1813,15 +2426,25 @@ function render() {
       const seqText = selectionSequenceText(item);
       const seqEnabled = seqText.length > 0;
       const canTrim = trimSelectionToContacts(item, thresholdValue, visibleChains) !== null;
+      const contactSelectEnabled = regionContactSelectionRecords(item, thresholdValue, visibleChains).length > 0;
       const maxLen = chainMap.get(item.chainId).length;
       return `
         <div class="menu-block">
           <div class="menu-title">${item.chainId}:${a}-${b}</div>
-          <div class="menu-row">
-            <button data-action="callout" data-id="${item.id}" ${seqEnabled ? '' : 'disabled'}>Sequence callout</button>
-            <button data-action="comment" data-id="${item.id}">Comment</button>
-            <button data-action="autotrim" data-id="${item.id}" ${canTrim ? '' : 'disabled'}>Autotrim</button>
-            <button data-action="clear" data-id="${item.id}">Clear</button>
+          <div class="menu-group-label">Annotations</div>
+          <div class="menu-row wrap">
+            <button class="menu-button" data-action="callout" data-id="${item.id}" ${seqEnabled ? '' : 'disabled'}>Sequence callout</button>
+            <button class="menu-button" data-action="comment" data-id="${item.id}">Comment</button>
+          </div>
+          <div class="menu-group-label">ChimeraX Select</div>
+          <div class="menu-row wrap">
+            <button class="menu-button" data-action="chimeraSelectAll" data-id="${item.id}">All models</button>
+            <button class="menu-button" data-action="chimeraSelectContacts" data-id="${item.id}" ${contactSelectEnabled ? '' : 'disabled'}>Contacts @ threshold</button>
+          </div>
+          <div class="menu-group-label">Range</div>
+          <div class="menu-row wrap">
+            <button class="menu-button" data-action="autotrim" data-id="${item.id}" ${canTrim ? '' : 'disabled'}>Autotrim</button>
+            <button class="menu-button" data-action="clear" data-id="${item.id}">Clear</button>
           </div>
           <div class="menu-row">
             <span style="font-size:12px;color:#334155;">Edit</span>
@@ -1838,6 +2461,7 @@ function render() {
             <span style="font-size:12px;color:#334155;">Color</span>
             <input type="color" data-action="color" data-id="${item.id}" value="${item.color || chainMap.get(item.chainId).color}">
           </div>
+          <div class="menu-group-label">Link Display</div>
           <div class="menu-row">
             <span style="font-size:12px;color:#334155;">Link color</span>
             <input type="color" data-action="linkColor" data-id="${item.id}" value="${item.linkColor || '#0f172a'}">
@@ -1874,6 +2498,13 @@ function render() {
           selObj.callout.text = selObj.comment || selObj.callout.text || '';
           selObj.callout.html = selObj.callout.html || '';
           selObj.callout.title = '';
+        } else if (act === 'chimeraSelectAll') {
+          copyChimeraXSelectCommand(regionSelectionRecords(selObj), `Copied ChimeraX select command for ${selObj.chainId}:${selObj.startPos}-${selObj.endPos}`);
+        } else if (act === 'chimeraSelectContacts') {
+          copyChimeraXSelectCommand(
+            regionContactSelectionRecords(selObj, thresholdValue, visibleChains),
+            `Copied ChimeraX contact select command for ${selObj.chainId}:${selObj.startPos}-${selObj.endPos}`
+          );
         } else if (act === 'autotrim') {
           const trimmed = trimSelectionToContacts(selObj, thresholdValue, visibleChains);
           if (trimmed) {
@@ -2205,7 +2836,7 @@ function render() {
     const count = linkCount(link);
     const t = thresholdIntensity(count, thresholdValue, maxCount);
     const eased = Math.pow(t, 0.65);
-    const alpha = minAlpha + (maxAlpha - minAlpha) * eased;
+    const alpha = useTransparency ? (minAlpha + (maxAlpha - minAlpha) * eased) : 1;
     const width = minStroke + (maxStroke - minStroke) * eased;
     let overrideColor = null;
     for (const sel of arcSelections) {
@@ -2249,6 +2880,14 @@ function render() {
       tooltip.style.opacity = '1';
       tooltip.classList.remove('clickable');
       positionTooltip(event);
+    });
+    path.style.cursor = 'copy';
+    path.addEventListener('click', (event) => {
+      event.stopPropagation();
+      copyChimeraXSelectCommand(
+        linkSelectionRecords(link),
+        `Copied ChimeraX select command for ${link.a}:${link.a_pos} ↔ ${link.b}:${link.b_pos}`
+      );
     });
     path.addEventListener('mouseleave', () => {
       tooltip.style.opacity = '0';
@@ -2298,6 +2937,8 @@ function buildSessionState() {
       maxWidth: Number(maxWidth.value),
       angle: Number(angle.value),
       countMode,
+      useTransparency,
+      useDefaultColors,
       orderText: orderInput.value,
       lockedBottomChain
     },
@@ -2345,6 +2986,11 @@ function applySessionState(state) {
   if (controls.countMode === 'atom' || controls.countMode === 'residue') {
     countMode = controls.countMode;
   }
+  useTransparency = controls.useTransparency !== false;
+  useTransparencyInput.checked = useTransparency;
+  useDefaultColors = hasChimeraXColors ? (controls.useDefaultColors !== false) : true;
+  useDefaultColorsInput.checked = useDefaultColors;
+  useDefaultColorsInput.disabled = !hasChimeraXColors;
   if (typeof controls.lockedBottomChain === 'string' && chainMap.has(controls.lockedBottomChain)) {
     lockedBottomChain = controls.lockedBottomChain;
   } else {
@@ -2439,6 +3085,14 @@ document.querySelectorAll('input[name="countMode"]').forEach((radio) => {
     safeRender();
   });
 });
+useTransparencyInput.addEventListener('change', () => {
+  useTransparency = useTransparencyInput.checked;
+  safeRender();
+});
+useDefaultColorsInput.addEventListener('change', () => {
+  useDefaultColors = useDefaultColorsInput.checked || !hasChimeraXColors;
+  safeRender();
+});
 
 window.addEventListener('pointerup', () => {
   let createdSelection = false;
@@ -2510,6 +3164,9 @@ plotWrap.addEventListener('click', (event) => {
   if (!selectionMenu.contains(event.target)) {
     closeSelectionMenu();
   }
+  if (infoPanel.classList.contains('visible') && !infoPanel.contains(event.target) && event.target !== infoButton) {
+    closeInfoPanel();
+  }
 });
 
 saveSessionBtn.addEventListener('click', () => {
@@ -2527,6 +3184,12 @@ saveSessionBtn.addEventListener('click', () => {
 loadSessionBtn.addEventListener('click', () => {
   loadSessionFile.value = '';
   loadSessionFile.click();
+});
+
+infoButton.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (infoPanel.classList.contains('visible')) closeInfoPanel();
+  else openInfoPanel();
 });
 
 loadSessionFile.addEventListener('change', async () => {
@@ -2574,7 +3237,11 @@ document.getElementById('downloadSvg').addEventListener('click', () => {
     const w = Number(fo.getAttribute('width') || 120);
     const encoded = fo.getAttribute('data-export-text') || '';
     const textVal = decodeURIComponent(encoded);
-    const lines = wrapLines(textVal, Math.max(10, w - 4));
+    const div = fo.querySelector('div');
+    const styledSegments = div
+      ? extractStyledTextSegments(div)
+      : [{ text: textVal, fill: '#0f172a', weight: '400', fontStyle: 'normal' }];
+    const lines = wrapStyledSegments(styledSegments, Math.max(10, w - 4));
     const boxId = fo.getAttribute('data-callout-fo');
     const box = boxId ? exportSvg.querySelector(`rect[data-callout-box="${boxId}"]`) : null;
     const title = boxId ? exportSvg.querySelector(`text[data-callout-title="${boxId}"]`) : null;
@@ -2584,15 +3251,29 @@ document.getElementById('downloadSvg').addEventListener('click', () => {
       box.setAttribute('height', `${neededHeight}`);
     }
     const text = document.createElementNS(ns, 'text');
-    text.setAttribute('fill', '#0f172a');
     text.setAttribute('font-size', '12');
     text.setAttribute('font-family', 'IBM Plex Sans, sans-serif');
     lines.forEach((line, idx) => {
-      const t = document.createElementNS(ns, 'tspan');
-      t.setAttribute('x', `${x + 2}`);
-      t.setAttribute('y', `${y + 12 + idx * 14}`);
-      t.textContent = line;
-      text.appendChild(t);
+      if (!line.length) {
+        const t = document.createElementNS(ns, 'tspan');
+        t.setAttribute('x', `${x + 2}`);
+        t.setAttribute('y', `${y + 12 + idx * 14}`);
+        t.textContent = ' ';
+        text.appendChild(t);
+        return;
+      }
+      line.forEach((seg, segIdx) => {
+        const t = document.createElementNS(ns, 'tspan');
+        if (segIdx === 0) {
+          t.setAttribute('x', `${x + 2}`);
+          t.setAttribute('y', `${y + 12 + idx * 14}`);
+        }
+        t.setAttribute('fill', seg.fill || '#0f172a');
+        if (seg.weight && seg.weight !== '400') t.setAttribute('font-weight', seg.weight);
+        if (seg.fontStyle && seg.fontStyle !== 'normal') t.setAttribute('font-style', seg.fontStyle);
+        t.textContent = seg.text;
+        text.appendChild(t);
+      });
     });
     fo.parentNode.insertBefore(text, fo.nextSibling);
     fo.remove();
@@ -2723,6 +3404,7 @@ if (!applyEmbeddedSavedSessionIfPresent()) {
         template.replace("__TITLE__", title)
         .replace("__MAX_COUNT__", str(max_count_atom))
         .replace("__DEFAULT_ORDER__", ", ".join(default_order))
+        .replace("__VERSION__", TOOL_VERSION)
         .replace("__DATA_JSON__", data_json)
     )
     output_path.write_text(html, encoding="utf-8")
@@ -2797,9 +3479,19 @@ def main() -> None:
         dna_mode=args.dna_mode,
     )
 
-    raw_counts_atom, residue_pairs_by_file, contact_models = parse_contacts(contact_paths)
+    (
+        raw_counts_atom,
+        residue_pairs_by_file,
+        contact_models,
+        contact_sources,
+    ) = parse_contacts(contact_paths)
     contacts, max_count_atom, max_count_residue = aggregate_contacts(
-        raw_counts_atom, residue_pairs_by_file, contact_models, pos_map, display_chain_of
+        raw_counts_atom,
+        residue_pairs_by_file,
+        contact_models,
+        contact_sources,
+        pos_map,
+        display_chain_of,
     )
 
     chain_lengths = {
@@ -2807,6 +3499,26 @@ def main() -> None:
     }
     chain_colors = build_colors(display_chains)
     default_order = [chain for chain in display_chains if chain_lengths.get(chain, 0) > 1] or display_chains[:]
+    model_ids = sorted(
+        {
+            model
+            for models in contact_models.values()
+            for model in models
+            if model
+        },
+        key=lambda label: (0, int(label[1:])) if label.startswith("#") and label[1:].isdigit() else (1, label),
+    )
+    metadata = build_html_metadata(
+        " ".join(shlex.quote(arg) for arg in sys.argv),
+        [
+            {
+                "name": path.name,
+                "filename": path.name,
+                "path": str(path.resolve()),
+            }
+            for path in cif_paths
+        ],
+    )
 
     output_path = args.output or contacts_dir / "contacts_circos.html"
     generate_html(
@@ -2821,6 +3533,9 @@ def main() -> None:
         default_order,
         start_pos_map,
         {},
+        model_ids,
+        {},
+        metadata,
         output_path,
     )
     print(f"Wrote {output_path}")

@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import re
 import webbrowser
+from collections import Counter, defaultdict
 from pathlib import Path
+import shlex
 from typing import Dict, Iterable, List, Set, Tuple
 
 from chimerax.core.commands import BoolArg, CmdDesc, IntArg, ObjectsArg, StringArg, register
@@ -83,6 +85,104 @@ def _objects_to_chain_resnums(objects) -> Dict[str, Set[int]]:
             continue
         chain_resnums.setdefault(chain, set()).add(resnum)
     return chain_resnums
+
+
+def _rgba_to_hex(color) -> str | None:
+    if color is None:
+        return None
+    try:
+        values = list(color)
+    except Exception:
+        return None
+    if len(values) < 3:
+        return None
+    try:
+        rgb = [int(v) for v in values[:3]]
+    except Exception:
+        return None
+    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+
+def _capture_residue_ribbon_colors(structures: Iterable) -> Dict[str, Dict[int, str]]:
+    per_residue: Dict[Tuple[str, int], Counter[str]] = defaultdict(Counter)
+    for structure in structures:
+        for residue in structure.residues:
+            chain = residue.chain_id
+            if not chain:
+                continue
+            try:
+                resnum = int(residue.number)
+            except Exception:
+                continue
+            color = _rgba_to_hex(getattr(residue, "ribbon_color", None))
+            if color is None:
+                continue
+            per_residue[(chain, resnum)][color] += 1
+    out: Dict[str, Dict[int, str]] = {}
+    for (chain, resnum), counts in per_residue.items():
+        out.setdefault(chain, {})[resnum] = counts.most_common(1)[0][0]
+    return out
+
+
+def _structure_metadata(structures: Iterable) -> List[Dict[str, str]]:
+    items: List[Dict[str, str]] = []
+    for structure in structures:
+        entry: Dict[str, str] = {}
+        name = getattr(structure, "name", None)
+        if name:
+            entry["name"] = str(name)
+        filename = getattr(structure, "filename", None)
+        if filename:
+            path = Path(str(filename)).expanduser()
+            entry["filename"] = path.name
+            entry["path"] = str(path)
+        atomspec = getattr(structure, "atomspec", None)
+        if atomspec:
+            entry["atomspec"] = str(atomspec)
+        if not entry:
+            entry["name"] = str(structure)
+        items.append(entry)
+    return items
+
+
+def _build_cli_invocation(
+    base_spec: str | None,
+    restrict_spec: str | None,
+    output_dir,
+    title: str,
+    inter_model: bool,
+    intramol: bool,
+    dna_mismatches: int,
+    dna_mode: str,
+    open_html: bool,
+    keep_temp: bool,
+) -> str:
+    parts = ["circoscontacts"]
+    if base_spec:
+        parts.append(base_spec)
+    if restrict_spec:
+        parts.extend(["restrict", restrict_spec])
+    if output_dir:
+        parts.extend(["output_dir", str(output_dir)])
+    parts.extend(
+        [
+            "title",
+            title,
+            "inter_model",
+            str(inter_model).lower(),
+            "intramol",
+            str(intramol).lower(),
+            "dna_mismatches",
+            str(dna_mismatches),
+            "dna_mode",
+            dna_mode,
+            "open_html",
+            str(open_html).lower(),
+            "keep_temp",
+            str(keep_temp).lower(),
+        ]
+    )
+    return " ".join(shlex.quote(part) for part in parts)
 
 
 def _to_ranges(values: Iterable[int]) -> List[Tuple[int, int]]:
@@ -274,9 +374,13 @@ def circoscontacts(
         included_chain_ids.update(restrict_chain_resnums.keys())
 
     chain_res, chain_resnums = _chain_residue_maps(structures)
+    residue_ribbon_colors = _capture_residue_ribbon_colors(structures)
     if included_chain_ids:
         chain_res = {c: r for c, r in chain_res.items() if c in included_chain_ids}
         chain_resnums = {c: n for c, n in chain_resnums.items() if c in included_chain_ids}
+        residue_ribbon_colors = {
+            c: color_map for c, color_map in residue_ribbon_colors.items() if c in included_chain_ids
+        }
     dna_chains = circos.detect_dna_chains(chain_res)
     (
         pos_map,
@@ -299,14 +403,41 @@ def circoscontacts(
         active_chain_resnums = restrict_chain_resnums
     active_ranges = _active_ranges_from_maps(active_chain_resnums, pos_map, display_chain_of)
 
-    raw_counts_atom, residue_pairs_by_file, contact_models = circos.parse_contacts(contact_paths)
+    (
+        raw_counts_atom,
+        residue_pairs_by_file,
+        contact_models,
+        contact_sources,
+    ) = circos.parse_contacts(contact_paths)
     contacts, max_count_atom, max_count_residue = circos.aggregate_contacts(
-        raw_counts_atom, residue_pairs_by_file, contact_models, pos_map, display_chain_of
+        raw_counts_atom,
+        residue_pairs_by_file,
+        contact_models,
+        contact_sources,
+        pos_map,
+        display_chain_of,
     )
 
     chain_lengths = {chain: len(pos_info.get(chain, [])) for chain in display_chains}
     chain_colors = circos.build_colors(display_chains)
+    display_residue_colors = circos.map_residue_colors_to_display(pos_info, residue_ribbon_colors)
     default_order = [chain for chain in display_chains if chain_lengths.get(chain, 0) > 1] or display_chains[:]
+    model_ids = [s.atomspec for s in structures if getattr(s, "atomspec", None)]
+    metadata = circos.build_html_metadata(
+        _build_cli_invocation(
+            base_spec,
+            restrict_spec,
+            output_dir,
+            title,
+            inter_model,
+            intramol,
+            dna_mismatches,
+            dna_mode,
+            open_html,
+            keep_temp,
+        ),
+        _structure_metadata(structures),
+    )
 
     html_path = run_root / "contacts_circos.html"
     try:
@@ -322,6 +453,9 @@ def circoscontacts(
             default_order,
             start_pos_map,
             active_ranges,
+            model_ids,
+            display_residue_colors,
+            metadata,
             html_path,
         )
     except Exception as err:
